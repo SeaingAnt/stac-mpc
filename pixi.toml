@@ -72,26 +72,6 @@ cuda = { features = ["cuda12"] }
 [tasks]
 install-mpx = "python -c 'import mpx' || pip install --no-deps git+https://github.com/iit-DLSLab/mpx.git@6f830d2140af550af6e8e65b18ade2d1d056584b"
 
-# Unified training entry point
-# Usage: pixi run train --algorithm ppo --config configs/drone_v0.json
-#        pixi run train --algorithm sppo_aug --config configs/drone_v0.json
-train = { cmd = "python sensitivity_rl/train.py", depends-on = ["install-mpx"] }
-
-# Convenience aliases for common algorithms
-train_ppo = { cmd = "python sensitivity_rl/train.py ALGORITHM=ppo", depends-on = ["install-mpx"] }
-train_sppo = { cmd = "python sensitivity_rl/train.py ALGORITHM=sppo", depends-on = ["install-mpx"] }
-train_sppo_dual = { cmd = "python sensitivity_rl/train.py ALGORITHM=sppo_aug", depends-on = ["install-mpx"] }
-train_sppo_grad = { cmd = "python sensitivity_rl/train.py ALGORITHM=sppo_grad", depends-on = ["install-mpx"] }
-
-# Legacy scripts (deprecated, use train.py instead)
-train_ppo_legacy = { cmd = "python sensitivity_rl/ppo.py", depends-on = ["install-mpx"] }
-train_sppo_legacy = { cmd = "python sensitivity_rl/sppo-vs-estimation-aug.py", depends-on = ["install-mpx"] }
-
-# Generate evaluation rollouts from a trained policy. Example:
-#   pixi run rollouts --run_dirs runs/latest --num_rollouts 100 --batch_size 256 --deterministic
-rollouts = { cmd = "python sensitivity_rl/rollouts.py", depends-on = ["install-mpx"] }
-
-
 # Deletes all results
 clean = "rm -r ./runs/*"
 
