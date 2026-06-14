@@ -15,7 +15,6 @@ Usage:
 
 import os
 
-os.environ["MUJOCO_GL"] = "egl"
 import json
 import importlib
 import re
