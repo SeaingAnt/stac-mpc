@@ -1,0 +1,101 @@
+# pixi.toml - Pixi environment and task configuration for sensitivity_rl
+
+[workspace]
+name = "mpc-transformer"
+description = "JAX transformer mpc."
+channels = ["conda-forge"]
+platforms = ["osx-arm64", "linux-64"]
+
+[dependencies]
+python = ">=3.10,<3.13"
+tensorboard = "*"
+tensorboardx = "*"
+numpy = "*"
+matplotlib = "*"
+python-build = "*"
+pip = "*"
+pytest = ">=8.4.2,<9"
+setuptools = "<71"
+
+[target.linux-64.dependencies]
+cuda-toolkit = ">=12.0"
+cuda-nvcc = ">=12.0"
+
+
+[pypi-dependencies]
+distrax = "*"
+torch = ">=2.0.0"
+gymnax = "*"
+flax = "*"
+optax = "*"
+chex = "*"
+hydra-core = "*"
+#sensitivity-rl = { path = ".", editable = true }
+mujoco-mjx = "*"
+mujoco = "*"
+warp = "*"
+warp-lang = "*"
+imageio = {version = ">=2.37.0,<3", extras =["ffmpeg", "pyrav"]}
+transforms3d = "*"
+dm_control = "*"
+tyro = "*"
+wandb = "*"
+trajax = { git = "https://github.com/google/trajax.git" }
+
+[target.linux-64.pypi-dependencies]
+jax = { version = ">=0.6.0, <=0.7.2", extras = ["cuda12"] }
+
+[target.osx-arm64.pypi-dependencies]
+jax = { version = ">=0.6.0, <=0.7.2" }
+
+# CPU environment: install JAX CPU wheels via PyPI
+[feature.cpu]
+[feature.cpu.pypi-dependencies]
+jax = { version = ">=0.6.0, <=0.7.2" }
+
+
+
+# CUDA 12 environment: install JAX CUDA 12 wheels via PyPI
+[feature.cuda12]
+platforms = ["linux-64"]
+[feature.cuda12.pypi-dependencies]
+jax = { version = ">=0.6.0, <=0.7.2", extras = ["cuda12"] }
+
+# JAX variant install options
+# CPU-only JAX wheel (works on Linux/macOS CPU)
+# Named environments to choose CPU or CUDA variant via: pixi -e <env>
+[environments]
+default = { features = ["cpu"] }
+cuda = { features = ["cuda12"] }
+
+
+[tasks]
+install-mpx = "python -c 'import mpx' || pip install --no-deps git+https://github.com/iit-DLSLab/mpx.git@6f830d2140af550af6e8e65b18ade2d1d056584b"
+
+# Unified training entry point
+# Usage: pixi run train --algorithm ppo --config configs/drone_v0.json
+#        pixi run train --algorithm sppo_aug --config configs/drone_v0.json
+train = { cmd = "python sensitivity_rl/train.py", depends-on = ["install-mpx"] }
+
+# Convenience aliases for common algorithms
+train_ppo = { cmd = "python sensitivity_rl/train.py ALGORITHM=ppo", depends-on = ["install-mpx"] }
+train_sppo = { cmd = "python sensitivity_rl/train.py ALGORITHM=sppo", depends-on = ["install-mpx"] }
+train_sppo_dual = { cmd = "python sensitivity_rl/train.py ALGORITHM=sppo_aug", depends-on = ["install-mpx"] }
+train_sppo_grad = { cmd = "python sensitivity_rl/train.py ALGORITHM=sppo_grad", depends-on = ["install-mpx"] }
+
+# Legacy scripts (deprecated, use train.py instead)
+train_ppo_legacy = { cmd = "python sensitivity_rl/ppo.py", depends-on = ["install-mpx"] }
+train_sppo_legacy = { cmd = "python sensitivity_rl/sppo-vs-estimation-aug.py", depends-on = ["install-mpx"] }
+
+# Generate evaluation rollouts from a trained policy. Example:
+#   pixi run rollouts --run_dirs runs/latest --num_rollouts 100 --batch_size 256 --deterministic
+rollouts = { cmd = "python sensitivity_rl/rollouts.py", depends-on = ["install-mpx"] }
+
+
+# Deletes all results
+clean = "rm -r ./runs/*"
+
+# Build wheel/sdist into dist/
+build = "python -m build"
+# Install in editable mode
+install = "pip install -e ."

@@ -1,0 +1,9 @@
+*.lock
+.pixi/
+runs/
+*.mp4
+*/wandb/*
+.vscode/
+.pytest_cache/
+__pycache__/
+*.out

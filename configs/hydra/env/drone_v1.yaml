@@ -1,0 +1,26 @@
+# @package _global_
+# Drone V3 environment configuration
+
+# Environment settings
+ENV_NAME: drone_v1
+
+# Environment-specific parameters
+NUM_ENVS: 2048
+NUM_STEPS: 200
+TOTAL_TIMESTEPS: 12e7
+NUM_MINIBATCHES: 32
+LR: 0.0005
+MAX_GRAD_NORM: 0.5
+
+# Override network architecture for drone
+ACTIVATION: tanh
+ANNEAL_LR: true
+GRU_HIDDEN_SIZE: 64
+
+# Override some RL parameters for drone
+GAMMA: 0.98
+CLIP_EPS: 0.2
+ENT_COEF: 0.001
+
+ACTOR_LAYER_SIZES: [128, 128, 128]
+CRITIC_LAYER_SIZES: [128, 128, 128]

@@ -1,0 +1,38 @@
+# @package _global_
+# CPPO method configuration
+
+ALGORITHM: cppo
+# Learning parameters
+LR: 0.001
+UPDATE_EPOCHS: 4
+NUM_MINIBATCHES: 25
+
+# RL Algorithm parameters
+GAMMA: 0.99
+NUM_ENVS: 50
+GAE_LAMBDA: 0.95
+CLIP_EPS: 0.1
+ENT_COEF: 0.0
+VF_COEF: 0.5
+MAX_GRAD_NORM: 0.5
+DOMAIN_RANDOMIZATION: false
+CVAR_ALPHA: 0.99
+CVAR_DELAY: 0.5
+CVAR_CLIP_RATIO: 1.0
+CVAR_NU_START: 2.0
+CVAR_LAM_START: 1.0
+CVAR_BETA: 2500.0
+CVAR_LAM_LR: 1e-3
+CVAR_NU_DELAY: 1.0
+CVAR_NU_LR: 1e-1
+CVAR_LAM_MAX: 1500.0
+
+# Network architecture
+ACTIVATION: tanh
+ACTOR_LAYER_SIZES: [256, 256]
+CRITIC_LAYER_SIZES: [256, 256]
+
+# Training settings
+ANNEAL_LR: false
+NORMALIZE_ENV: true
+DEBUG: true

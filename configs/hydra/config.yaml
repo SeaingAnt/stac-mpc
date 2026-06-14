@@ -1,0 +1,37 @@
+# Default training configuration
+hydra:
+  job:
+    chdir: False       # Keeps the fix for JAX cache
+  run:
+    dir: .             # Runs in current directory
+  output_subdir: null  # Disables .hydra folder creation     
+  
+defaults:
+  - method: diffmpc_transformer_stab
+  - env: drone_v1
+  - override hydra/job_logging: none  # Correct way to disable job logging
+  - override hydra/hydra_logging: none  # Correct way to disable hydra logging
+  - _self_
+
+# Override any method/env settings below if needed
+# Random seed
+SEED: 0
+
+# Weights & Biases logging
+WANDB_ENABLED: true
+WANDB_PROJECT: transformer_mpc
+WANDB_ENTITY: null
+WANDB_RUN_NAME: null
+WANDB_TAGS: []
+WANDB_SYNC_TENSORBOARD: true
+WANDB_SAVE_CODE: false
+
+# Evaluation loop
+EVAL_ENABLED: true
+EVAL_DURING_TRAINING_ENABLED: true
+EVAL_EVERY_UPDATES: 10
+EVAL_RENDER_VIDEO: true
+EVAL_RENDER_DURING_TRAINING: true
+EVAL_RENDER_WIDTH: 640
+EVAL_RENDER_HEIGHT: 480
+EVAL_RENDER_MAX_FRAMES: 1000

@@ -1,0 +1,38 @@
+# @package _global_
+# PPO method configuration
+
+ALGORITHM: diffmpc_transformer_stab
+# Learning parameters
+LR: 0.001
+UPDATE_EPOCHS: 4
+NUM_MINIBATCHES: 25
+
+# RL Algorithm parameters
+GAMMA: 0.99
+NUM_ENVS: 24
+GAE_LAMBDA: 0.95
+CLIP_EPS: 0.1
+ENT_COEF: 0.001
+VF_COEF: 0.5
+MAX_GRAD_NORM: 0.5
+DOMAIN_RANDOMIZATION: false
+
+# Network architecture
+ACTIVATION: tanh
+ACTOR_LAYER_SIZES: [256, 256]
+CRITIC_LAYER_SIZES: [256, 256]
+TRANSFORMER_HIDDEN_DIM: 128
+TRANSFORMER_NUM_HEADS: 2
+TRANSFORMER_NUM_LAYERS: 1
+TRANSFORMER_FFN_HIDDEN_DIM: 128
+REG_COEF: 1e-3
+
+# Training settings
+ANNEAL_LR: false
+NORMALIZE_ENV: true
+DEBUG: true
+
+# DiffMPC specific
+MPC_HORIZON: 10
+MPC_ITERS: 1
+MPC_PCG_ITERS: 20
