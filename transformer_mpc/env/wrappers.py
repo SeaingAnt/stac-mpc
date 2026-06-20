@@ -240,6 +240,9 @@ class ResetEnvWrapper(GymnaxWrapper):
         state = jax.tree.map(lambda x, y: jax.lax.select(done, x, y), state_re, state_st)
         obs = jax.lax.select(done, obs_re, obs_st)
 
+        base = state_st.state if hasattr(state_st, "state") else state_st
+        info["terminal_pos"] = base.pos
+        info["terminal_attitude"] = base.attitude
         info["real_next_obs"] = obs_st
         return obs, state, reward, done, info
 
@@ -300,6 +303,9 @@ class DomainRandomizationWrapper(GymnaxWrapper):
         state = jax.tree.map(lambda x, y: jax.lax.select(done, x, y), state_re, state_st)
         obs = jax.lax.select(done, obs_re, obs_st)
 
+        base = env_state_st.state if hasattr(env_state_st, "state") else env_state_st
+        info["terminal_pos"] = base.pos
+        info["terminal_attitude"] = base.attitude
         info["real_next_obs"] = obs_st
         return obs, state, reward, done, info
 

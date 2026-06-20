@@ -571,6 +571,65 @@ def main():
             [(data[0], data[2]) for data in runs_data], error_plot_path
         )
         _save_combined_trajectory_3d_plot(runs_data, trajectory_plot_path, env_params=env_params)
+
+        import numpy as np
+        for env_state_batch, info_batch, label in runs_data:
+            state_batch = jax.tree_util.tree_map(jax.device_get, env_state_batch)
+            info_batch = jax.tree_util.tree_map(jax.device_get, info_batch)
+            while hasattr(state_batch, "env_state"):
+                state_batch = state_batch.env_state
+            
+            model_state = state_batch.state
+            raw_positions = np.asarray(model_state.pos)
+            raw_attitudes = np.asarray(model_state.attitude)
+            
+            returned_episode = np.asarray(info_batch["returned_episode"])
+            
+            if "terminal_pos" in info_batch:
+                terminal_positions = np.asarray(info_batch["terminal_pos"])
+                terminal_attitudes = np.asarray(info_batch["terminal_attitude"])
+            else:
+                terminal_positions = raw_positions
+                terminal_attitudes = raw_attitudes
+            
+            num_steps = raw_positions.shape[0]
+            num_envs = raw_positions.shape[1] if raw_positions.ndim > 2 else 1
+            
+            positions_list = []
+            attitudes_list = []
+            
+            for env_idx in range(num_envs):
+                env_returns = (
+                    returned_episode[:, env_idx]
+                    if returned_episode.ndim > 1
+                    else returned_episode
+                )
+                done_steps = np.where(env_returns)[0].tolist()
+                
+                if len(done_steps) > 0:
+                    first_done_idx = done_steps[0]
+                    env_pos = np.zeros((first_done_idx + 1, 3), dtype=raw_positions.dtype)
+                    env_pos[:first_done_idx] = raw_positions[:first_done_idx, env_idx]
+                    env_pos[first_done_idx] = terminal_positions[first_done_idx, env_idx]
+                    
+                    env_att = np.zeros((first_done_idx + 1, 4), dtype=raw_attitudes.dtype)
+                    env_att[:first_done_idx] = raw_attitudes[:first_done_idx, env_idx]
+                    env_att[first_done_idx] = terminal_attitudes[first_done_idx, env_idx]
+                else:
+                    env_pos = raw_positions[:, env_idx]
+                    env_att = raw_attitudes[:, env_idx]
+                
+                positions_list.append(env_pos)
+                attitudes_list.append(env_att)
+            
+            trajectory_data = {
+                "position": positions_list,
+                "attitude": attitudes_list,
+            }
+            npy_path = plot_dir / f"{label}_trajectory.npy"
+            np.save(npy_path, trajectory_data)
+            print(f"Saved perturbed trajectory for '{label}' to {npy_path}")
+
         print("Done.")
 
 

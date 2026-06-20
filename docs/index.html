@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Paper Title Placeholder - Stable Transformer-Actor-Critic MPC</title>
+    <meta name="description"
+        content="Paper Title Placeholder - A short summary of the Stable Transformer-Actor-Critic Model Predictive Control paper.">
+    <!-- Google Fonts: Inter for a clean, modern look -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+
+    <!-- MathJax for LaTeX rendering -->
+    <script>
+        window.MathJax = {
+            tex: {
+                inlineMath: [['$', '$'], ['\\(', '\\)']]
+            }
+        };
+    </script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+</head>
+
+<body>
+    <header class="hero">
+        <div class="container">
+            <div class="venue">Under Review</div>
+            <h1 class="title">Stable Transformer-Actor-Critic Model Predictive Control: A Contraction Analysis Approach
+            </h1>
+
+            <div class="authors">
+                <a href="#" class="author">Antonio Marino</a><sup>1</sup>,
+                <a href="#" class="author">Valerio Modugno</a><sup>2</sup>,
+                <a href="#" class="author">Marco Cognetti</a><sup>3</sup>
+            </div>
+
+            <div class="affiliations">
+                <span><sup>1</sup>University of Cambridge</span>
+                <span><sup>2</sup>University Collage London</span>
+                <span><sup>3</sup>LAAS-CNRS</span>
+            </div>
+
+            <div class="quick-links">
+                <a href="#" class="btn btn-primary"><span class="icon">📄</span> Paper (PDF)</a>
+                <a href="https://github.com/SeaingAnt/stable-transformer-actor-critic-mpc" class="btn btn-secondary"
+                    target="_blank"><span class="icon">💻</span> Code (GitHub)</a>
+            </div>
+        </div>
+    </header>
+
+    <main class="container">
+        <!-- TLDR Section -->
+        <section class="tldr" id="tldr" style="margin-bottom: 40px;">
+            <div class="hook-text">
+                <strong>TL;DR:</strong> The paper introduces a Transformer-Actor-Critic MPC framework that uses sequence
+                models to predict optimal control costs. By proving the internal stability of Transformers and applying
+                contraction theory, the authors develop a training regularizer that mathematically guarantees safe,
+                stable closed-loop control in highly noisy environments.
+            </div>
+        </section>
+
+        <!-- Visual Demo Section -->
+        <section class="visual-demo" id="demo">
+            <div class="video-description" style="margin-bottom: 20px;">
+                <p style="font-size: 1.1rem; color: var(--heading-color);">
+                    <strong>Demo:</strong> The video below shows a drone navigating while avoiding obstacles under
+                    severe system disturbance and input noise.
+                </p>
+            </div>
+            <div class="demo-container">
+                <video autoplay loop muted playsinline class="demo-media">
+                    <source src="assets/obstacle.mp4" type="video/mp4">
+                </video>
+            </div>
+        </section>
+
+        <!-- Abstract Section -->
+        <section class="overview" id="abstract">
+            <h2 class="section-title">Overview</h2>
+            <div class="abstract-content">
+                <p>
+                    While traditional Actor-Critic MPC relies on simple MLPs to dynamically adjust cost matrices, they
+                    struggle to capture the temporal consistencies needed for environments with time-correlated
+                    disturbances. Sequence models like Transformers solve this temporal issue, but proving their
+                    closed-loop stability within a feedback control loop is notoriously difficult.
+                </p>
+                <p>
+                    We bridge this gap by embedding a Transformer into a differentiable MPC pipeline to predict cost
+                    matrices from past trajectories. By treating the Transformer and physical plant as an interconnected
+                    dynamical system, we use Riemannian contraction theory to mathematically bound the network's
+                    sensitivity to input noise. Enforcing these boundaries during training yields a highly performant
+                    control policy with certifiable theoretical robustness against severe disturbances.
+                </p>
+            </div>
+
+            <ul class="contributions-list">
+                <li>
+                    <div class="bullet-text"><strong>Contribution 1:</strong> We provide a rigorous mathematical proof
+                        demonstrating that Transformer architectures can be constrained to satisfy global incremental
+                        Input-to-State Stability ($\delta$ISS).</div>
+                </li>
+                <li>
+                    <div class="bullet-text"><strong>Contribution 2:</strong> Using Riemannian contraction theory, we
+                        map the Transformer's sensitivity to input noise directly to the physical system's dynamics,
+                        deriving a strict "small-gain" condition for the entire closed-loop system.</div>
+                </li>
+                <li>
+                    <div class="bullet-text"><strong>Contribution 3:</strong> We translate these theoretical stability
+                        bounds into a structural regularization loss enforced during the neural network's training
+                        phase.</div>
+                </li>
+            </ul>
+
+            <div class="demo-container">
+                <!-- TODO: Replace the placeholder below with your PNG image tag -->
+                <img src="assets/scheme.png" alt="System Schematics" class="demo-media">
+            </div>
+        </section>
+
+        <!-- Citation Section -->
+        <section class="citation" id="citation">
+            <h2 class="section-title">Citation</h2>
+            <p>If you find this work useful, please consider citing it:</p>
+            <div class="bibtex-container">
+                <button class="copy-btn" id="copyBibtex">Copy</button>
+                <pre><code id="bibtexCode">@article{author202Xstable,
+  title={[Paper Title Placeholder] Stable Transformer-Actor-Critic Model Predictive Control},
+  author={Author, First and Author, Second and Author, Third},
+  journal={arXiv preprint arXiv:XXXX.XXXXX},
+  year={202X}
+}</code></pre>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <div class="container">
+            <p>&copy; 202X [Author Names]. Licensed under MIT.</p>
+        </div>
+    </footer>
+
+    <script src="script.js"></script>
+</body>
+
+</html>

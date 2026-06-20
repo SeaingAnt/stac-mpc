@@ -1,0 +1,308 @@
+:root {
+    /* Clean white/grey palette */
+    --bg-color: #f8fafc;        /* Slate 50 */
+    --text-color: #334155;      /* Slate 700 */
+    --text-light: #64748b;      /* Slate 500 */
+    --heading-color: #0f172a;   /* Slate 900 */
+    --white: #ffffff;
+    --border-color: #e2e8f0;    /* Slate 200 */
+    
+    /* Vibrant accents */
+    --accent-primary: #3b82f6;  /* Blue 500 */
+    --accent-hover: #2563eb;    /* Blue 600 */
+    --accent-gradient: linear-gradient(135deg, #3b82f6, #8b5cf6); /* Blue to Purple */
+    
+    /* Soft shadows & sizing */
+    --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+    --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+    --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+    --radius: 12px;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    background-color: var(--bg-color);
+    color: var(--text-color);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+.container {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 0 20px;
+}
+
+/* Header & Hero Section */
+.hero {
+    padding: 80px 0 60px;
+    text-align: center;
+    background: var(--white);
+    border-bottom: 1px solid var(--border-color);
+    margin-bottom: 40px;
+}
+
+.venue {
+    display: inline-block;
+    padding: 6px 16px;
+    background-color: #eff6ff; /* Blue 50 */
+    color: #1d4ed8;            /* Blue 700 */
+    border-radius: 20px;
+    font-size: 0.875rem;
+    font-weight: 600;
+    margin-bottom: 20px;
+    letter-spacing: 0.025em;
+}
+
+.title {
+    font-size: 2.5rem;
+    font-weight: 800;
+    color: var(--heading-color);
+    margin-bottom: 20px;
+    line-height: 1.2;
+    letter-spacing: -0.025em;
+}
+
+.authors {
+    font-size: 1.125rem;
+    margin-bottom: 10px;
+}
+
+.author {
+    color: var(--accent-primary);
+    text-decoration: none;
+    font-weight: 500;
+    transition: color 0.2s;
+}
+
+.author:hover {
+    color: var(--accent-hover);
+    text-decoration: underline;
+}
+
+.affiliations {
+    font-size: 0.95rem;
+    color: var(--text-light);
+    margin-bottom: 35px;
+}
+
+.affiliations span {
+    margin: 0 10px;
+}
+
+/* Buttons */
+.quick-links {
+    display: flex;
+    justify-content: center;
+    gap: 15px;
+    flex-wrap: wrap;
+}
+
+.btn {
+    display: inline-flex;
+    align-items: center;
+    padding: 10px 24px;
+    border-radius: 8px;
+    font-weight: 600;
+    text-decoration: none;
+    transition: all 0.2s ease;
+    font-size: 1rem;
+}
+
+.icon {
+    margin-right: 8px;
+}
+
+.btn-primary {
+    background: var(--accent-gradient);
+    color: var(--white);
+    box-shadow: var(--shadow-md);
+    border: none;
+}
+
+.btn-primary:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-lg);
+}
+
+.btn-secondary {
+    background: var(--white);
+    color: var(--heading-color);
+    border: 1px solid var(--border-color);
+    box-shadow: var(--shadow-sm);
+}
+
+.btn-secondary:hover {
+    background: #f1f5f9; /* Slate 100 */
+    transform: translateY(-2px);
+}
+
+/* Common Section Styles */
+.section-title {
+    font-size: 1.75rem;
+    font-weight: 700;
+    color: var(--heading-color);
+    margin-bottom: 24px;
+    padding-bottom: 12px;
+    border-bottom: 2px solid var(--border-color);
+    letter-spacing: -0.025em;
+}
+
+section {
+    margin-bottom: 60px;
+}
+
+/* Visual Demo Placeholders */
+.visual-demo {
+    display: flex;
+    flex-direction: column;
+    gap: 30px;
+}
+
+.demo-container {
+    width: 100%;
+}
+
+.demo-media {
+    width: 100%;
+    height: auto;
+    border-radius: calc(var(--radius) - 6px);
+    display: block;
+}
+
+.placeholder-media {
+    width: 100%;
+    min-height: 400px;
+    background-color: #f1f5f9; /* Slate 100 */
+    border-radius: calc(var(--radius) - 6px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-light);
+    font-weight: 500;
+    font-size: 1.1rem;
+    border: 2px dashed #cbd5e1; /* Slate 300 */
+}
+
+.overview {
+    padding: 20px 0;
+}
+
+.hook-text {
+    font-size: 1.25rem;
+    color: var(--heading-color);
+    margin-bottom: 30px;
+    line-height: 1.6;
+}
+
+.abstract-content h3 {
+    font-size: 1.1rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-light);
+    margin-bottom: 15px;
+}
+
+.abstract-content p {
+    color: var(--text-color);
+    text-align: justify;
+    font-size: 1.05rem;
+}
+
+/* Contributions */
+.contributions-list {
+    list-style: none;
+}
+
+.contributions-list li {
+    display: flex;
+    align-items: flex-start;
+    margin-bottom: 24px;
+}
+
+.bullet-icon {
+    font-size: 1.25rem;
+    margin-right: 15px;
+    flex-shrink: 0;
+}
+
+.bullet-text {
+    font-size: 1.1rem;
+    color: var(--text-color);
+    padding-top: 10px;
+}
+
+/* Citation Section */
+.bibtex-container {
+    position: relative;
+    background: #1e293b; /* Slate 800 */
+    border-radius: var(--radius);
+    padding: 24px;
+    margin-top: 20px;
+    box-shadow: var(--shadow-md);
+}
+
+.bibtex-container pre {
+    overflow-x: auto;
+}
+
+.bibtex-container code {
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    color: #e2e8f0; /* Slate 200 */
+    font-size: 0.95rem;
+    line-height: 1.5;
+}
+
+.copy-btn {
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    color: var(--white);
+    padding: 6px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 500;
+    transition: background 0.2s;
+}
+
+.copy-btn:hover {
+    background: rgba(255, 255, 255, 0.2);
+}
+
+/* Footer */
+footer {
+    text-align: center;
+    padding: 40px 0;
+    color: var(--text-light);
+    font-size: 0.9rem;
+}
+
+/* Responsive adjustments */
+@media (max-width: 600px) {
+    .title {
+        font-size: 2rem;
+    }
+    .overview {
+        padding: 24px;
+    }
+    .contributions-list li {
+        flex-direction: column;
+        padding: 20px;
+    }
+    .bullet-icon {
+        margin-bottom: 12px;
+    }
+    .bullet-text {
+        padding-top: 0;
+    }
+}
