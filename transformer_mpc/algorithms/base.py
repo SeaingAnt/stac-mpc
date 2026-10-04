@@ -5,6 +5,7 @@ from typing import Callable, Optional
 
 import jax
 import jax.numpy as jnp
+from flax import nnx
 
 from buffers import RunnerState
 
@@ -60,7 +61,43 @@ def default_run_dir(algo_name, config, runs_root, ts):
 # ---------------------------------------------------------------------------
 # AlgorithmSpec
 # ---------------------------------------------------------------------------
+def _policy_dist_from_model(model, obs, rng):
+    """Return policy distribution while supporting model signatures with/without rng."""
+    if isinstance(obs, dict) and "local_obs" in obs:
+        obs = obs["local_obs"]
+    try:
+        model_out = model(obs, rng)
+    except TypeError:
+        model_out = model(obs)
+    return model_out[0] if isinstance(model_out, tuple) else model_out
 
+def default_make_eval_step(config, graphdef, env, env_params, rngs_state=None, **kwargs):
+    """Standard evaluation step for single-model algorithms (PPO, CPPO)."""
+    if rngs_state is None:
+        rngs_state = {}
+
+    def _eval_step(eval_state: RunnerState, _unused):
+        rng, model_rng = jax.random.split(eval_state.rng)
+        model = nnx.merge(graphdef, eval_state.train_state.params, rngs_state)
+        pi = _policy_dist_from_model(model, eval_state.last_obs, model_rng)
+        action = jnp.clip(pi.mode(), -1.0, 1.0)
+
+        rng, step_rng = jax.random.split(rng)
+        rng_step = jax.random.split(step_rng, config["NUM_ENVS"])
+        obsv, env_state, _reward, _done, info = env.step(
+            rng_step, eval_state.env_state, action, env_params
+        )
+
+        new_eval_state = RunnerState(
+            train_state=eval_state.train_state,
+            env_state=env_state,
+            last_obs=obsv,
+            rng=rng,
+            extras=eval_state.extras,
+        )
+        return new_eval_state, (info, env_state)
+
+    return _eval_step
 
 @dataclass
 class AlgorithmSpec:
@@ -83,6 +120,7 @@ class AlgorithmSpec:
         extract_losses:       Extract logging metrics from loss_info.
         init_runner_state:    Create the initial RunnerState.
         run_dir:              Build the run directory path.
+        make_eval_step:       Factory for evaluation step.
     """
 
     # --- required ---
@@ -98,14 +136,18 @@ class AlgorithmSpec:
     extract_losses: Optional[Callable] = None
     init_runner_state: Optional[Callable] = None
     run_dir: Optional[Callable] = None
+    make_eval_step: Optional[Callable] = None
 
     def __post_init__(self):
         if self.extract_losses is None:
             self.extract_losses = default_extract_losses
         if self.init_runner_state is None:
             self.init_runner_state = default_init_runner_state
+        if self.make_eval_step is None:
+            self.make_eval_step = default_make_eval_step
         if self.run_dir is None:
             name = self.algo_name
             self.run_dir = lambda config, runs_root, ts: default_run_dir(
                 name, config, runs_root, ts
             )
+

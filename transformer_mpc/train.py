@@ -14,7 +14,7 @@ Usage:
 """
 
 import os
-
+os.environ["MUJOCO_GL"] = "egl"
 import json
 import importlib
 import re
@@ -35,10 +35,10 @@ warnings.filterwarnings(
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 os.environ["TF_CUDNN_DETERMINISTIC"] = "1"
 os.environ["XLA_FLAGS"] = (
-    "--xla_gpu_autotune_level=0 --xla_gpu_force_compilation_parallelism=16 --xla_cpu_enable_fast_math=true --xla_gpu_enable_fast_min_max=true "
+    "--xla_gpu_autotune_level=1 --xla_gpu_force_compilation_parallelism=16 --xla_cpu_enable_fast_math=true --xla_gpu_enable_fast_min_max=true "
 )
-# Note that setting xla_gpu_autotune_level=1 greatly improves performance, but causes non-determinism even when seeding the rng.
-# For reproducibility in experiments, we set it to 0 (no autotuning).
+# Note that setting xla_gpu_autotune_level=1 greatly improves performance, but causes non-determinism even when seeding the rng.  
+# For reproducibility in experiments, we set it to 0 (no autotuning).  
 # For final training runs where speed is more important than exact reproducibility, setting it to 1 is recommended.
 # os.environ["XLA_FLAGS"] = (
 #     "--xla_gpu_autotune_level=1 --xla_gpu_force_compilation_parallelism=8 --xla_cpu_enable_fast_math=true --xla_gpu_enable_fast_min_max=true "
@@ -221,29 +221,26 @@ def make_train(
         init_rng,
     )
     graphdef = networks["graphdef"]
-    rngs_state = networks.get("rngs_state", {})
 
     # Create algorithm-specific functions (closures over graphdef)
+    rngs_state = networks.get("rngs_state", {})
     state_template = networks.get("state_template")
-    loss_fn = spec.make_loss_fn(config, graphdef, rngs_state, state_template, env=env, env_params=env_params, networks=networks)
+    loss_fn = spec.make_loss_fn(config, graphdef, rngs_state=rngs_state, state_template=state_template, env=env, env_params=env_params, networks=networks)
     collect_fn = spec.make_collect_fn(config, env, env_params, networks)
     update_fn = spec.make_update_fn(config, loss_fn, shuffle_batch, networks)
-    eval_step_fn = _build_deterministic_eval_step(
-        config, graphdef, rngs_state, env, env_params
-    )
+    eval_step_fn = spec.make_eval_step(config, graphdef, env, env_params, rngs_state=rngs_state)
     eval_video_wrapper = EvalVideoWrapper(env)
 
     total_steps = config["TOTAL_TIMESTEPS"]
 
-    eval_during_training_enabled = bool(
-        config.get("EVAL_DURING_TRAINING_ENABLED", False)
-    )
+    eval_during_training_enabled = bool(config.get("EVAL_DURING_TRAINING_ENABLED", False))
     eval_every_updates = int(config.get("EVAL_EVERY_UPDATES", 0))
+   
+   
+    def init_runner_state_fn(rng):
+        return spec.init_runner_state(config, env, env_params, networks, rng)
 
-    def train(rng):
-        # INIT RUNNER STATE (algorithm handles state structure and RNG splitting)
-        runner_state = spec.init_runner_state(config, env, env_params, networks, rng)
-
+    def train_step(runner_state, start_update, num_updates):
         # TRAIN LOOP
         def _update_step(runner_state, update_idx):
 
@@ -300,60 +297,6 @@ def make_train(
                 wandb_run=wandb_run,
             )
 
-            # Optional periodic evaluation loop from inside training scan.
-            if eval_during_training_enabled and eval_every_updates > 0:
-                should_eval = ((update_idx + 1) % eval_every_updates) == 0
-
-                def _periodic_eval_callback(
-                    update_idx,
-                    timestep,
-                    should_eval,
-                    eval_start_state,
-                ):
-                    if not bool(should_eval):
-                        return
-                    update_num = int(update_idx) + 1
-                    timestep_int = int(timestep)
-
-                    # debug.callback materializes values on host; move eval state back to
-                    # a single device before calling JAX scans in evaluation.
-                    try:
-                        target_device = jax.devices()[0]
-
-                        def _to_device(x):
-                            if isinstance(x, jax.Array):
-                                return jax.device_put(x, target_device)
-                            if hasattr(x, "dtype"):
-                                return jax.device_put(jnp.asarray(x), target_device)
-                            return x
-
-                        eval_start_state_dev = jax.tree.map(
-                            _to_device, eval_start_state
-                        )
-
-                        run_evaluation_loop(
-                            config,
-                            eval_step_fn,
-                            eval_start_state_dev,
-                            eval_video_wrapper,
-                            run_dir,
-                            writer=writer,
-                            wandb_run=wandb_run,
-                            step=timestep_int,
-                            trigger=f"during_training_update_{update_num}",
-                        )
-                    except Exception as exc:
-                        # Keep training alive if periodic eval fails.
-                        print(f"Skipping periodic eval at update {update_num}: {exc}")
-
-                jax.debug.callback(
-                    _periodic_eval_callback,
-                    update_idx,
-                    current_timestep,
-                    should_eval,
-                    collect_state,
-                )
-
             # Rebuild runner state with updated train_state(s)
             runner_state = RunnerState(
                 train_state=update_state.train_state,
@@ -364,74 +307,15 @@ def make_train(
             )
             return runner_state, None
 
-        # Run training loop
-        update_indices = jnp.arange(config["NUM_UPDATES"])
-        runner_state, _ = jax.lax.scan(_update_step, runner_state, update_indices)
+        # Run training loop for the requested chunk of updates
+        update_indices = jnp.arange(num_updates) + start_update
+        runner_state, _ = jax.lax.scan(
+            _update_step, runner_state, update_indices
+        )
         return runner_state
 
-    return train
-
-
-def _policy_dist_from_model(model, obs, rng, **kwargs):
-    """Return policy distribution while supporting model signatures with/without rng."""
-    try:
-        model_out = model(obs, rng_key=rng, **kwargs)
-    except TypeError:
-        try:
-            model_out = model(obs, rng=rng, **kwargs)
-        except TypeError:
-            try:
-                model_out = model(obs, rng, **kwargs)
-            except TypeError:
-                model_out = model(obs, **kwargs)
-    return model_out[0]
-
-
-def _build_deterministic_eval_step(config, graphdef, rngs_state, env, env_params):
-    """Create deterministic env-step function for evaluation rollouts."""
-
-    def get_physical_state(state):
-        def _get_base_state(s):
-            if hasattr(s, "pos"):
-                return s
-            if hasattr(s, "state") and hasattr(s.state, "pos"):
-                return s.state
-            if hasattr(s, "env_state"):
-                return _get_base_state(s.env_state)
-            return None
-
-        base = _get_base_state(state)
-        if base is None:
-            return None
-        return jnp.concatenate([base.pos, base.attitude, base.vel, base.omega], axis=-1)
-
-    def _eval_step(eval_state: RunnerState, _unused):
-        rng, model_rng = jax.random.split(eval_state.rng)
-        model = nnx.merge(graphdef, eval_state.train_state.params, rngs_state)
-
-        kwargs = {}
-        if "DIFFMPC" in config.get("ALGORITHM", "").upper():
-            kwargs["physical_state"] = get_physical_state(eval_state.env_state)
-
-        pi = _policy_dist_from_model(model, eval_state.last_obs, model_rng, **kwargs)
-        action = pi.mode()
-
-        rng, step_rng = jax.random.split(rng)
-        rng_step = jax.random.split(step_rng, config["NUM_ENVS"])
-        obsv, env_state, _reward, _done, info = env.step(
-            rng_step, eval_state.env_state, action, env_params
-        )
-
-        new_eval_state = RunnerState(
-            train_state=eval_state.train_state,
-            env_state=env_state,
-            last_obs=obsv,
-            rng=rng,
-            extras=eval_state.extras,
-        )
-        return new_eval_state, (info, env_state)
-
-    return _eval_step
+    # Return functions needed for outer loop training
+    return init_runner_state_fn, train_step, eval_step_fn, eval_video_wrapper
 
 
 def _run_deterministic_eval_rollout(config, eval_start_state, eval_step_fn):
@@ -454,9 +338,7 @@ def _run_deterministic_eval_rollout(config, eval_start_state, eval_step_fn):
     return episodic_return, env_state_batch
 
 
-def _render_eval_video(
-    config, eval_video_wrapper, env_state_batch, run_dir, trigger, step, wandb_run
-):
+def _render_eval_video(config, eval_video_wrapper, env_state_batch, run_dir, trigger, step, wandb_run):
     """Render evaluation trajectory via wrapper/environment and optionally log to W&B."""
     if not config.get("EVAL_RENDER_VIDEO", False):
         return None
@@ -545,10 +427,12 @@ def run_evaluation_loop(
             render_fps = int(eval_video_wrapper.get_render_fps(default_fps=30))
             print
             log_payload["eval/video"] = wandb.Video(
-                str(video_path), fps=render_fps, format="mp4"
+                str(video_path), 
+                fps=render_fps,
+                format="mp4"
             )
             record["video_path"] = str(video_path)
-
+            
         wandb_run.log(log_payload, step=log_step)
 
     eval_summary_path = run_dir / "evaluation_summary.json"
@@ -573,20 +457,17 @@ def init_wandb(config, run_dir, algorithm):
         return None
 
     if wandb is None:
-        print(
-            "WANDB_ENABLED=true but wandb is not installed. Continuing without W&B logging."
-        )
+        print("WANDB_ENABLED=true but wandb is not installed. Continuing without W&B logging.")
         return None
 
     return wandb.init(
         project=config.get("WANDB_PROJECT", "nphm-jax"),
         entity=config.get("WANDB_ENTITY") or None,
         name=config.get("WANDB_RUN_NAME") or run_dir.name,
-        tags=config.get("WANDB_TAGS")
-        or [algorithm, config.get("ENV_NAME", "unknown-env")],
+        tags=config.get("WANDB_TAGS") or [algorithm, config.get("ENV_NAME", "unknown-env")],
         dir=str(run_dir),
         config=config,
-        sync_tensorboard=bool(config.get("WANDB_SYNC_TENSORBOARD", True)),
+        sync_tensorboard=bool(config.get("WANDB_SYNC_TENSORBOARD", False)),
         save_code=bool(config.get("WANDB_SAVE_CODE", False)),
     )
 
@@ -631,7 +512,7 @@ def main(cfg: DictConfig):
 
     # Create unified training function
     rng, init_rng = jax.random.split(rng)
-    train_fn = make_train(
+    init_runner_state_fn, train_step, eval_step_fn, eval_video_wrapper = make_train(
         config,
         spec,
         writer,
@@ -640,23 +521,79 @@ def main(cfg: DictConfig):
         wandb_run=wandb_run,
     )
 
-    # JIT compile and train
-    train_jit = jax.jit(train_fn)
+    # JIT compile 
+    init_runner_state_jit = jax.jit(init_runner_state_fn)
+    # static_argnums=(2,) ensures num_updates can be statically unrolled if needed, 
+    # but since it's just the shape of arange, we can pass it via jax.jit static_argnums.
+    train_step_jit = jax.jit(train_step, static_argnums=(2,))
+
     print("Compiling and training...")
     start_time = time.time()
-    final_state = train_jit(rng)
-    jax.block_until_ready(final_state)
+    
+    runner_state = init_runner_state_jit(rng)
+    jax.block_until_ready(runner_state)
+    
+    total_updates = int(config["NUM_UPDATES"])
+    eval_every = int(config.get("EVAL_EVERY_UPDATES", 0))
+    eval_enabled = bool(config.get("EVAL_DURING_TRAINING_ENABLED", False))
+    
+    # We break training into chunks of `chunk_size` updates so we can evaluate in between
+    chunk_size = int(eval_every) if (eval_enabled and eval_every > 0) else total_updates
+    
+    for start_idx in range(0, total_updates, chunk_size):
+        num_updates = min(chunk_size, total_updates - start_idx)
+        runner_state = train_step_jit(runner_state, start_idx, num_updates)
+        jax.block_until_ready(runner_state)
+        
+        # Periodic evaluation
+        if eval_enabled and eval_every > 0:
+            if (start_idx + num_updates) % eval_every == 0:
+                update_num = start_idx + num_updates
+                timestep_int = update_num * config["NUM_STEPS"] * config["NUM_ENVS"]
+                
+                try:
+                    target_device = jax.devices()[0]
+                    def _to_device(x):
+                        if isinstance(x, jax.Array):
+                            return jax.device_put(x, target_device)
+                        if hasattr(x, "dtype"):
+                            return jax.device_put(jnp.asarray(x), target_device)
+                        return x
+
+                    eval_start_state_dev = jax.tree.map(_to_device, runner_state)
+                    
+                    run_evaluation_loop(
+                        config,
+                        eval_step_fn,
+                        eval_start_state_dev,
+                        eval_video_wrapper,
+                        run_dir,
+                        writer=writer,
+                        wandb_run=wandb_run,
+                        step=timestep_int,
+                        trigger=f"during_training_update_{update_num}",
+                    )
+                except Exception as exc:
+                    print(f"Skipping periodic eval at update {update_num}: {exc}")
+                    
+    final_state = runner_state
     end_time = time.time()
 
     # Log training speed (total time includes compilation)
     total_time = end_time - start_time
     total_steps = config["TOTAL_TIMESTEPS"]
-
+    
     writer.add_scalar("perf/total_time_seconds", total_time, total_steps)
 
     # Save params
     params = final_state.train_state.params
-    pure_params = params.to_pure_dict()
+    if hasattr(params, "to_pure_dict"):
+        pure_params = params.to_pure_dict()
+    elif isinstance(params, dict):
+        pure_params = {k: (v.to_pure_dict() if hasattr(v, "to_pure_dict") else v) for k, v in params.items()}
+    else:
+        pure_params = params
+
     (run_dir / "policy_params.msgpack").write_bytes(serialization.to_bytes(pure_params))
 
     # Add environment-specific attributes to config
@@ -704,6 +641,10 @@ def main(cfg: DictConfig):
     writer.add_hparams(hparam_dict, {}, run_name=".")
 
     writer.close()
+    
+    if wandb_run is not None:
+        wandb_run.log({"perf/total_time_seconds": total_time}, step=int(total_steps))
+        wandb_run.finish()
 
     print(f"Training complete. Results saved to {run_dir}")
 

@@ -11,7 +11,7 @@ from .base import AlgorithmSpec
 from .common import gae_standard
 from net_utils import create_optimizer, make_linear_schedule
 from buffers import Transition, RunnerState, UpdateState
-from networks import ActorCritic
+from networks import MAPPODiffMPCActor, MAPPOCritic
 from env.wrappers import (
     GymnaxWrapper,
     LogWrapper,
@@ -37,30 +37,21 @@ def make_mpx_solve_fn(env_dynamics, env_params, horizon, dt, nx, nu, pcg_iters=5
         del t, parameter
         dx = env_dynamics.state_dot(x, u, None)
         x_mid = x + (dt / 2.0) * dx
-        x_mid = x_mid.at[3:7].set(x_mid[3:7] / (jnp.linalg.norm(x_mid[3:7]) + 1e-12))
         dx_mid = env_dynamics.state_dot(x_mid, u, None)
         x_next = x + dt * dx_mid
-        x_next = x_next.at[3:7].set(x_next[3:7] / (jnp.linalg.norm(x_next[3:7]) + 1e-12))
         return x_next
 
     def cost(W, reference, x, u, t):
-        del reference
         weights = W
         half_dim = horizon * (nx + nu)
 
-        # Softplus preserves gradients everywhere but cleanly bounds from below.
-        # This prevents both the catastrophic vanishing gradients from saturated tanh
-        # and the extreme Q matrix explosion from raw clipping.
         Q_R_traj = jnp.clip(jax.nn.softplus(weights[:half_dim]) * 10.0, 0.0, 100.0)
-        # Q_R_traj = jax.nn.tanh(weights[:half_dim]) ** 2 * 100.0
         p_logits = weights[half_dim:]
 
         Q_R_traj = Q_R_traj.reshape((horizon, nx + nu))
-        # Keep the +0.05 minimum floor for strict positive definiteness
         Q_traj = Q_R_traj[:, :nx] + 0.05
         R_traj = Q_R_traj[:, nx:] + 0.05
 
-        # P can naturally be negative, so we map it symmetrically
         p_mapped = 10.0 * jnp.tanh(p_logits)
         P_traj = p_mapped.reshape((horizon, nx + nu))
 
@@ -72,20 +63,14 @@ def make_mpx_solve_fn(env_dynamics, env_params, horizon, dt, nx, nu, pcg_iters=5
         P_x = Pt[:nx]
         P_u = Pt[nx:]
 
-        control_violation = _safe_control_violation(
-            u,
-            env_params.min_input,
-            env_params.max_input,
-        )
-        control_constraint_cost = 25.0 * jnp.sum(control_violation**2)
+        state_error = x - reference
 
         stage_cost = (
-            0.5 * (jnp.sum(Qt * x**2) + jnp.sum(Rt * u**2))
-            + jnp.sum(P_x * x)
+            0.5 * (jnp.sum(Qt * state_error**2) + jnp.sum(Rt * u**2))
+            + jnp.sum(P_x * state_error)
             + jnp.sum(P_u * u)
-            + control_constraint_cost
         )
-        term_cost = 0.5 * jnp.sum(Qt * x**2) + jnp.sum(P_x * x)
+        term_cost = 0.5 * jnp.sum(Qt * state_error**2) + jnp.sum(P_x * state_error)
 
         return jnp.where(t == horizon, term_cost, stage_cost)
 
@@ -106,11 +91,10 @@ def make_mpx_solve_fn(env_dynamics, env_params, horizon, dt, nx, nu, pcg_iters=5
     return solve_fn
 
 
-def solve_mpc(weights, physical_state, env_params, env_dynamics, solve_fn, horizon, dt, nx, nu, mpc_iters=1):
-    nominal_hover = jnp.array([env_params.m * env_params.g, 0.0, 0.0, 0.0])
+def solve_mpc(weights, physical_state, reference, env_params, env_dynamics, solve_fn, horizon, dt, nx, nu, mpc_iters=1):
+    nominal_hover = jnp.zeros(nu)
 
     W = weights
-    reference = jnp.zeros(1)
     parameter = jnp.zeros(1)
 
     init_U0 = jnp.tile(nominal_hover, (horizon, 1))
@@ -118,10 +102,8 @@ def solve_mpc(weights, physical_state, env_params, env_dynamics, solve_fn, horiz
     def rollout_step(x, u):
         dx = env_dynamics.state_dot(x, u, None)
         x_mid = x + (dt / 2.0) * dx
-        x_mid = x_mid.at[3:7].set(x_mid[3:7] / (jnp.linalg.norm(x_mid[3:7]) + 1e-12))
         dx_mid = env_dynamics.state_dot(x_mid, u, None)
         x_next = x + dt * dx_mid
-        x_next = x_next.at[3:7].set(x_next[3:7] / (jnp.linalg.norm(x_next[3:7]) + 1e-12))
         return x_next, x_next
 
     _, X_traj = jax.lax.scan(rollout_step, physical_state, init_U0)
@@ -147,17 +129,10 @@ def solve_mpc(weights, physical_state, env_params, env_dynamics, solve_fn, horiz
     )
 
     physical_action = jnp.clip(
-        physical_action, env_params.min_input, env_params.max_input
+        physical_action, -1.0, 1.0
     )
 
-    input_span = env_params.max_input - env_params.min_input
-    action_span = env_params.max_action - env_params.min_action
-    normalized_action = (
-        env_params.min_action
-        + ((physical_action - env_params.min_input) / input_span) * action_span
-    )
-
-    return normalized_action
+    return physical_action
 
 
 def wrap_env(env, config):
@@ -191,14 +166,18 @@ def make_collect_fn(config, env, env_params, networks):
             return None
 
         base = _get_base_state(state)
-        return jnp.concatenate([base.pos, base.attitude, base.vel, base.omega], axis=-1)
+        if base is None:
+            return None, None
+        return base.pos, base.target
 
     def _env_step(runner_state: RunnerState, unused):
         rng, _rng = jax.random.split(runner_state.rng)
-        model = nnx.merge(graphdef, runner_state.train_state.params)
+        actor_model = nnx.merge(graphdef["actor"], runner_state.train_state.params["actor"])
+        critic_model = nnx.merge(graphdef["critic"], runner_state.train_state.params["critic"])
 
-        physical_state = get_physical_state(runner_state.env_state)
-        pi, value = model(runner_state.last_obs, physical_state=physical_state)
+        physical_state, reference = get_physical_state(runner_state.env_state)
+        pi = actor_model(runner_state.last_obs["local_obs"], physical_state=physical_state, reference=reference)
+        value = critic_model(runner_state.last_obs["global_state"])
 
         action = pi.sample(seed=_rng)
         log_prob = pi.log_prob(action)
@@ -211,10 +190,11 @@ def make_collect_fn(config, env, env_params, networks):
         )
 
         if "real_next_obs" in info:
-            real_next_value = model.critic(info["real_next_obs"])
+            real_next_value = critic_model(info["real_next_obs"]["global_state"])
             info["real_next_value"] = real_next_value
 
         info["physical_state"] = physical_state
+        info["reference"] = reference
 
         obsv = jax.lax.stop_gradient(obsv)
         env_state = jax.lax.stop_gradient(env_state)
@@ -235,10 +215,13 @@ def make_collect_fn(config, env, env_params, networks):
 
 def make_loss_fn(config, graphdef, *args, **kwargs):
     def _loss_fn(params, traj_batch, advantages, targets):
-        model = nnx.merge(graphdef, params)
+        actor_model = nnx.merge(graphdef["actor"], params["actor"])
+        critic_model = nnx.merge(graphdef["critic"], params["critic"])
 
         physical_state = traj_batch.info["physical_state"]
-        pi, value = model(traj_batch.obs, physical_state=physical_state)
+        reference = traj_batch.info["reference"]
+        pi = actor_model(traj_batch.obs["local_obs"], physical_state=physical_state, reference=reference)
+        value = critic_model(traj_batch.obs["global_state"])
 
         log_prob = pi.log_prob(traj_batch.action)
 
@@ -320,8 +303,8 @@ def make_update_fn(config, loss_fn, shuffle_batch_fn, networks):
 
 
 def calculate_gae(config, traj_batch, networks, collect_state):
-    model = nnx.merge(networks["graphdef"], collect_state.train_state.params)
-    last_val = model.critic(collect_state.last_obs)
+    critic_model = nnx.merge(networks["graphdef"]["critic"], collect_state.train_state.params["critic"])
+    last_val = critic_model(collect_state.last_obs["global_state"])
     advantages, targets = gae_standard(config, traj_batch, last_val)
     return {
         "advantages": advantages,
@@ -346,103 +329,112 @@ def extract_losses(loss_info):
 
 
 def init_networks(config, env, env_params, rng, load_params_fn=None):
-    obs_dim = env.observation_space(env_params).shape[-1]
-
-    nx = env.state_dim if hasattr(env, "state_dim") else 13
-    nu = env.num_actions if hasattr(env, "num_actions") else 4
-    # Prefer MPC horizon from environment parameters; fall back to config
+    obs_space = env.observation_space(env_params)
+    local_obs_dim = obs_space.spaces["local_obs"].shape[-1]
+    global_state_dim = obs_space.spaces["global_state"].shape[-1]
+    
+    num_agents = env.num_agents
+    
+    # Each MPC is 2D
+    nx = 2
+    nu = 2
+    
     horizon = getattr(env_params, "mpc_horizon", config.get("MPC_HORIZON", 10))
 
     mpc_weight_dim = 2 * horizon * (nx + nu)
-    env_action_dim = 4
+    env_action_dim_per_agent = 2
 
     env_dynamics = env.mpc_dynamics(nx, nu, env_params)
     solve_fn = make_mpx_solve_fn(
         env_dynamics=env_dynamics,
         env_params=env_params,
         horizon=horizon,
-        dt=getattr(env_params, "dt", 0.02),
+        dt=getattr(env_params, "dt", 0.1),
         nx=nx,
         nu=nu,
         pcg_iters=config.get("MPC_PCG_ITERS", 50),
     )
 
-    def mpc_layer(weights, physical_state):
+    def mpc_layer(weights, physical_state, reference):
         return solve_mpc(
             weights,
             physical_state,
+            reference,
             env_params,
             env_dynamics,
             solve_fn,
             horizon,
-            getattr(env_params, "dt", 0.02),
+            getattr(env_params, "dt", 0.1),
             nx,
             nu,
             mpc_iters=config.get("MPC_ITERS", 1),
         )
 
     @jax.custom_vjp
-    def safe_mpc_layer(weights, physical_state):
-        return mpc_layer(weights, physical_state)
+    def safe_mpc_layer(weights, physical_state, reference):
+        return mpc_layer(weights, physical_state, reference)
 
-    def safe_mpc_layer_fwd(weights, physical_state):
-        return mpc_layer(weights, physical_state), (weights, physical_state)
+    def safe_mpc_layer_fwd(weights, physical_state, reference):
+        return mpc_layer(weights, physical_state, reference), (weights, physical_state, reference)
 
     def safe_mpc_layer_bwd(res, g):
-        weights, physical_state = res
-
-        # Keep the MPC adjoint bounded so gradients remain numerically stable.
+        weights, physical_state, reference = res
 
         g = jnp.clip(g, -10.0, 10.0)
         g = jnp.where(jnp.abs(g) < 1e-10, 1e-10 * jnp.sign(g + 1e-20), g)
 
-        _, vjp_fn = jax.vjp(mpc_layer, weights, physical_state)
-        g_w, g_p = vjp_fn(g)
+        _, vjp_fn = jax.vjp(mpc_layer, weights, physical_state, reference)
+        g_w, g_p, g_r = vjp_fn(g)
 
-        g_w = jax.tree_util.tree_map(
-            lambda x: jnp.clip(
-                jnp.where(jnp.isnan(x) | jnp.isinf(x), 0.0, x), -1.0, 1.0
-            ),
-            g_w,
-        )
-        g_p = jax.tree_util.tree_map(
-            lambda x: (
-                jnp.clip(jnp.where(jnp.isnan(x) | jnp.isinf(x), 0.0, x), -1.0, 1.0)
-                if x is not None
-                else None
-            ),
-            g_p,
-        )
+        g_w = jax.tree_util.tree_map(lambda x: jnp.clip(jnp.where(jnp.isnan(x) | jnp.isinf(x), 0.0, x), -1.0, 1.0), g_w)
+        g_p = jax.tree_util.tree_map(lambda x: (jnp.clip(jnp.where(jnp.isnan(x) | jnp.isinf(x), 0.0, x), -1.0, 1.0) if x is not None else None), g_p)
+        g_r = jax.tree_util.tree_map(lambda x: (jnp.clip(jnp.where(jnp.isnan(x) | jnp.isinf(x), 0.0, x), -1.0, 1.0) if x is not None else None), g_r)
 
-        return g_w, g_p
+        return g_w, g_p, g_r
 
     safe_mpc_layer.defvjp(safe_mpc_layer_fwd, safe_mpc_layer_bwd)
 
-    vmap_mpc_layer = jax.vmap(safe_mpc_layer, in_axes=(0, 0))
+    # Vmap over agents! (weights, pos, target are per-agent)
+    vmap_mpc_layer_agents = jax.vmap(safe_mpc_layer, in_axes=(0, 0, 0))
+    # Vmap over batch
+    vmap_mpc_layer_batch = jax.vmap(vmap_mpc_layer_agents, in_axes=(0, 0, 0))
 
-    network = ActorCritic(
-        obs_dim=obs_dim,
-        action_dim=mpc_weight_dim,
-        env_action_dim=env_action_dim,
-        mpc_fn=vmap_mpc_layer,
+    actor_network = MAPPODiffMPCActor(
+        local_obs_dim=local_obs_dim,
+        mpc_weight_dim=mpc_weight_dim,
+        env_action_dim_per_agent=env_action_dim_per_agent,
+        num_agents=num_agents,
+        mpc_fn=vmap_mpc_layer_batch,
         activation=config["ACTIVATION"],
-        rngs=nnx.Rngs(rng),
+        actor_layer_sizes=tuple(config.get("ACTOR_LAYER_SIZES", (256, 256))),
+        rngs=nnx.Rngs(int(rng[0])),
     )
-    graphdef, params = nnx.split(network)
+
+    critic_network = MAPPOCritic(
+        global_state_dim=global_state_dim,
+        activation=config["ACTIVATION"],
+        critic_layer_sizes=tuple(config.get("CRITIC_LAYER_SIZES", (256, 256))),
+        rngs=nnx.Rngs(int(rng[0]) + 1),
+    )
+
+    actor_graphdef, actor_state = nnx.split(actor_network)
+    critic_graphdef, critic_state = nnx.split(critic_network)
 
     linear_schedule = make_linear_schedule(config)
     tx = create_optimizer(config, linear_schedule)
+
     train_state = TrainState.create(
         apply_fn=None,
-        params=params,
+        params={"actor": actor_state, "critic": critic_state},
         tx=tx,
     )
+
+    graphdef = {"actor": actor_graphdef, "critic": critic_graphdef}
 
     if load_params_fn is not None:
         train_state = train_state.replace(params=load_params_fn(train_state.params))
 
     return {
-        "network": network,
         "graphdef": graphdef,
         "train_state": train_state,
     }
@@ -462,18 +454,16 @@ def make_eval_step(config, graphdef, env, env_params, **kwargs):
 
         base = _get_base_state(state)
         if base is None:
-            return None
-        if not hasattr(base, "attitude"):
-            return None
-        return jnp.concatenate([base.pos, base.attitude, base.vel, base.omega], axis=-1)
+            return None, None
+        return base.pos, base.target
 
     def _eval_step(eval_state: RunnerState, _unused):
         rng, model_rng = jax.random.split(eval_state.rng)
-        model = nnx.merge(graphdef, eval_state.train_state.params)
+        actor_model = nnx.merge(graphdef["actor"], eval_state.train_state.params["actor"])
         
-        physical_state = get_physical_state(eval_state.env_state)
+        physical_state, reference = get_physical_state(eval_state.env_state)
         
-        pi, _ = model(eval_state.last_obs, physical_state=physical_state)
+        pi = actor_model(eval_state.last_obs["local_obs"], physical_state=physical_state, reference=reference)
         action = jnp.clip(pi.mode(), -1.0, 1.0)
 
         rng, step_rng = jax.random.split(rng)

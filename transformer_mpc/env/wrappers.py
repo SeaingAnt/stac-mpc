@@ -148,7 +148,7 @@ class NormalizeVecReward(GymnaxWrapper):
 
     def reset(self, key, params=None):
         obs, state = self._env.reset(key, params)
-        batch_count = obs.shape[0]
+        batch_count = jax.tree_util.tree_leaves(obs)[0].shape[0]
         state = NormalizeVecRewEnvState(
             mean=0.0,
             var=1.0,
@@ -166,7 +166,7 @@ class NormalizeVecReward(GymnaxWrapper):
 
         batch_mean = jnp.mean(return_val, axis=0)
         batch_var = jnp.var(return_val, axis=0)
-        batch_count = obs.shape[0]
+        batch_count = jax.tree_util.tree_leaves(obs)[0].shape[0]
 
         delta = batch_mean - state.mean
         tot_count = state.count + batch_count
@@ -182,7 +182,7 @@ class NormalizeVecReward(GymnaxWrapper):
             mean=new_mean,
             var=new_var,
             count=new_count,
-            return_val=return_val,
+            return_val=return_val * (1 - done),
             env_state=env_state,
         )
         return obs, state, reward / jnp.sqrt(state.var + 1e-8), done, info
@@ -238,11 +238,13 @@ class ResetEnvWrapper(GymnaxWrapper):
         obs_re, state_re = self.reset(key, params)
 
         state = jax.tree.map(lambda x, y: jax.lax.select(done, x, y), state_re, state_st)
-        obs = jax.lax.select(done, obs_re, obs_st)
+        obs = jax.tree.map(lambda x, y: jax.lax.select(done, x, y), obs_re, obs_st)
 
         base = state_st.state if hasattr(state_st, "state") else state_st
-        info["terminal_pos"] = base.pos
-        info["terminal_attitude"] = base.attitude
+        if hasattr(base, "pos"):
+            info["terminal_pos"] = base.pos
+        if hasattr(base, "attitude"):
+            info["terminal_attitude"] = base.attitude
         info["real_next_obs"] = obs_st
         return obs, state, reward, done, info
 
@@ -306,6 +308,40 @@ class DomainRandomizationWrapper(GymnaxWrapper):
         base = env_state_st.state if hasattr(env_state_st, "state") else env_state_st
         info["terminal_pos"] = base.pos
         info["terminal_attitude"] = base.attitude
+        info["real_next_obs"] = obs_st
+        return obs, state, reward, done, info
+
+
+class MultiAgentResetEnvWrapper(GymnaxWrapper):
+    """Auto-reset wrapper for multi-agent environments.
+
+    Unlike ResetEnvWrapper, this does not assume drone-specific state fields
+    (pos, attitude) and stores the real next obs for bootstrapping.
+    """
+
+    def __init__(self, env, params=None):
+        super().__init__(env)
+
+    def reset(self, key, params=None):
+        obs, env_state = self._env.reset(key, params)
+        return obs, env_state
+
+    def step(self, key, state, action, params=None):
+        obs_st, state_st, reward, done, info = self._env.step(
+            key, state, action, params
+        )
+        obs_re, state_re = self.reset(key, params)
+
+        state = jax.tree.map(
+            lambda x, y: jax.lax.select(done, x, y), state_re, state_st
+        )
+        obs = jax.tree.map(
+            lambda x, y: jax.lax.select(
+                jnp.broadcast_to(done, x.shape) if isinstance(x, jnp.ndarray) else done,
+                x, y
+            ),
+            obs_re, obs_st,
+        )
         info["real_next_obs"] = obs_st
         return obs, state, reward, done, info
 

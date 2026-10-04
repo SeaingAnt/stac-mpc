@@ -458,9 +458,9 @@ class TransformerEncoderBlock(nnx.Module):
             qkv_features=feature_dim,
             deterministic=True,
             decode=False,
-            kernel_init=orthogonal(0.1),
+            kernel_init=orthogonal(jnp.sqrt(2)),
             bias_init=constant(0.0),
-            out_kernel_init=orthogonal(0.1),
+            out_kernel_init=orthogonal(jnp.sqrt(2)),
             out_bias_init=constant(0.0),
             rngs=rngs,
         )
@@ -470,14 +470,14 @@ class TransformerEncoderBlock(nnx.Module):
         self.ffn_dense1 = nnx.Linear(
             feature_dim,
             ffn_hidden_dim,
-            kernel_init=orthogonal(0.1),
+            kernel_init=orthogonal(jnp.sqrt(2)),
             bias_init=constant(0.0),
             rngs=rngs,
         )
         self.ffn_dense2 = nnx.Linear(
             ffn_hidden_dim,
             feature_dim,
-            kernel_init=orthogonal(0.1),
+            kernel_init=orthogonal(jnp.sqrt(2)),
             bias_init=constant(0.0),
             rngs=rngs,
         )
@@ -637,7 +637,7 @@ class TransformerActorCritic(nnx.Module):
         x = self.input_projection(x)  # (batch_size, seq_len, transformer_hidden_dim)
         x = nnx.tanh(x)
         # Add spatial encoding
-        # x = self.spatial_encoding(x)
+        x = self.spatial_encoding(x)
 
         # Apply transformer encoder blocks
         for encoder_block in self.encoder_blocks:
@@ -693,3 +693,503 @@ class TransformerActorCritic(nnx.Module):
         for layer in self.critic_layers:
             x = activation(layer(x))
         return jnp.squeeze(self.critic_output_layer(x), axis=-1)
+
+
+class MAPPOActor(nnx.Module):
+    """Decentralized MAPPO actor with weight-sharing across agents.
+
+    Each agent gets its own local observation and produces its own action,
+    but the MLP weights are shared across all agents.
+
+    Input:  (batch, num_agents, local_obs_dim)
+    Output: MultivariateNormalDiag with event shape (num_agents * action_dim_per_agent,)
+    """
+
+    def __init__(
+        self,
+        local_obs_dim: int,
+        action_dim_per_agent: int,
+        num_agents: int,
+        *,
+        activation: str = "tanh",
+        actor_layer_sizes: tuple = (256, 256),
+        rngs: nnx.Rngs,
+    ):
+        self.local_obs_dim = local_obs_dim
+        self.action_dim_per_agent = action_dim_per_agent
+        self.num_agents = num_agents
+        self.activation_name = activation
+
+        _layers = []
+        in_dim = local_obs_dim
+        for layer_dim in actor_layer_sizes:
+            _layers.append(
+                nnx.Linear(
+                    in_dim,
+                    layer_dim,
+                    kernel_init=orthogonal(jnp.sqrt(2)),
+                    bias_init=constant(0.0),
+                    rngs=rngs,
+                )
+            )
+            in_dim = layer_dim
+        self.layers = nnx.List(_layers)
+        self.output_layer = nnx.Linear(
+            in_dim,
+            action_dim_per_agent,
+            kernel_init=orthogonal(0.01),
+            bias_init=constant(0.0),
+            rngs=rngs,
+        )
+        # Per-agent, per-action-dim learnable log_std
+        self.actor_log_std = nnx.Param(
+            jnp.zeros((num_agents, action_dim_per_agent))
+        )
+
+    def __call__(self, local_obs):
+        """Forward pass.
+
+        Args:
+            local_obs: (batch, num_agents, local_obs_dim)
+        Returns:
+            distrax.MultivariateNormalDiag over flattened (batch, num_agents * action_dim)
+        """
+        activation = nnx.relu if self.activation_name == "relu" else nnx.tanh
+        batch_size = local_obs.shape[0]
+        # Process each agent independently through the shared MLP
+        x = local_obs.reshape(-1, self.local_obs_dim)
+        for layer in self.layers:
+            x = activation(layer(x))
+        x = self.output_layer(x)
+        # Reshape back to (batch, num_agents, action_dim_per_agent)
+        actor_mean = x.reshape(batch_size, self.num_agents, self.action_dim_per_agent)
+
+        log_std = jnp.clip(self.actor_log_std.value, -5.0, 2.0)
+        std = jnp.exp(log_std)[None, :, :]
+        std = jnp.broadcast_to(std, actor_mean.shape)
+
+        return distrax.MultivariateNormalDiag(
+            actor_mean,
+            std,
+        )
+
+
+class MAPPOCritic(nnx.Module):
+    """Centralized MAPPO critic.
+
+    Takes the global state and outputs a single scalar value.
+
+    Input:  (batch, global_state_dim)
+    Output: (batch,)
+    """
+
+    def __init__(
+        self,
+        global_state_dim: int,
+        *,
+        activation: str = "tanh",
+        critic_layer_sizes: tuple = (256, 256),
+        rngs: nnx.Rngs,
+    ):
+        self.activation_name = activation
+
+        _layers = []
+        in_dim = global_state_dim
+        for layer_dim in critic_layer_sizes:
+            _layers.append(
+                nnx.Linear(
+                    in_dim,
+                    layer_dim,
+                    kernel_init=orthogonal(jnp.sqrt(2)),
+                    bias_init=constant(0.0),
+                    rngs=rngs,
+                )
+            )
+            in_dim = layer_dim
+        self.layers = nnx.List(_layers)
+        self.output_layer = nnx.Linear(
+            in_dim,
+            1,
+            kernel_init=orthogonal(1.0),
+            bias_init=constant(0.0),
+            rngs=rngs,
+        )
+
+    def __call__(self, global_state):
+        """Forward pass.
+
+        Args:
+            global_state: (batch, global_state_dim)
+        Returns:
+            (batch,) scalar value
+        """
+        activation = nnx.relu if self.activation_name == "relu" else nnx.tanh
+        x = global_state
+        for layer in self.layers:
+            x = activation(layer(x))
+        return jnp.squeeze(self.output_layer(x), axis=-1)
+
+class MultiAgentActorCritic(nnx.Module):
+    def __init__(
+        self,
+        obs_dim: int,
+        action_dim: int,
+        *,
+        env_action_dim: int = None,
+        mpc_fn=None,
+        activation: str = "tanh",
+        actor_layer_sizes: tuple = (256, 256),
+        critic_layer_sizes: tuple = (256, 256),
+        rngs: nnx.Rngs,
+    ):
+        self.action_dim = action_dim
+        self.mpc_fn = mpc_fn
+        self.env_action_dim = env_action_dim if env_action_dim is not None else action_dim
+        self.activation_name = activation
+
+        _actor_layers = []
+        in_dim = obs_dim
+        for layer_dim in actor_layer_sizes:
+            _actor_layers.append(
+                nnx.Linear(in_dim, layer_dim, kernel_init=orthogonal(jnp.sqrt(2)), bias_init=constant(0.0), rngs=rngs)
+            )
+            in_dim = layer_dim
+        self.actor_layers = nnx.List(_actor_layers)
+        self.actor_output = nnx.Linear(in_dim, action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0), rngs=rngs)
+        self.actor_log_std = nnx.Param(jnp.zeros(self.env_action_dim))
+
+        _critic_layers = []
+        in_dim = obs_dim
+        for layer_dim in critic_layer_sizes:
+            _critic_layers.append(
+                nnx.Linear(in_dim, layer_dim, kernel_init=orthogonal(jnp.sqrt(2)), bias_init=constant(0.0), rngs=rngs)
+            )
+            in_dim = layer_dim
+        self.critic_layers = nnx.List(_critic_layers)
+        self.critic_output_layer = nnx.Linear(in_dim, 1, kernel_init=orthogonal(1.0), bias_init=constant(0.0), rngs=rngs)
+
+    def __call__(self, x, physical_state=None, reference=None):
+        pi = self.actor(x, physical_state, reference)
+        value = self.critic(x)
+        return pi, value
+
+    def actor(self, x, physical_state=None, reference=None):
+        activation = nnx.relu if self.activation_name == "relu" else nnx.tanh
+        x = x[:, -1, :] if x.ndim == 3 else x
+        for layer in self.actor_layers:
+            x = activation(layer(x))
+
+        out = self.actor_output(x)
+
+        if self.mpc_fn is not None:
+            actor_mean = self.mpc_fn(out, physical_state, reference)
+        else:
+            actor_mean = out
+
+        log_std = jnp.clip(self.actor_log_std.value, -5.0, 2.0)
+        return distrax.MultivariateNormalDiag(actor_mean, jnp.exp(log_std))
+
+    def critic(self, x):
+        activation = nnx.relu if self.activation_name == "relu" else nnx.tanh
+        x = x[:, -1, :] if x.ndim == 3 else x
+        for layer in self.critic_layers:
+            x = activation(layer(x))
+        return jnp.squeeze(self.critic_output_layer(x), axis=-1)
+
+class MAPPODiffMPCActor(nnx.Module):
+    def __init__(
+        self,
+        local_obs_dim: int,
+        mpc_weight_dim: int,
+        env_action_dim_per_agent: int,
+        num_agents: int,
+        mpc_fn,
+        *,
+        activation: str = "tanh",
+        actor_layer_sizes: tuple = (256, 256),
+        rngs: nnx.Rngs,
+    ):
+        self.local_obs_dim = local_obs_dim
+        self.mpc_weight_dim = mpc_weight_dim
+        self.env_action_dim_per_agent = env_action_dim_per_agent
+        self.num_agents = num_agents
+        self.activation_name = activation
+        self.mpc_fn = mpc_fn
+
+        _layers = []
+        in_dim = local_obs_dim
+        for layer_dim in actor_layer_sizes:
+            _layers.append(
+                nnx.Linear(in_dim, layer_dim, kernel_init=orthogonal(jnp.sqrt(2)), bias_init=constant(0.0), rngs=rngs)
+            )
+            in_dim = layer_dim
+        self.layers = nnx.List(_layers)
+        self.output_layer = nnx.Linear(
+            in_dim, mpc_weight_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0), rngs=rngs
+        )
+        self.actor_log_std = nnx.Param(jnp.zeros((num_agents, env_action_dim_per_agent)))
+
+    def __call__(self, local_obs, physical_state=None, reference=None):
+        activation = nnx.relu if self.activation_name == "relu" else nnx.tanh
+        x = local_obs[:, :, -1, :] if local_obs.ndim == 4 else local_obs
+        
+        # Share weights across agents by reshaping
+        batch_size = x.shape[0]
+        x = x.reshape(batch_size * self.num_agents, self.local_obs_dim)
+
+        for layer in self.layers:
+            x = activation(layer(x))
+
+        out = self.output_layer(x)
+        out = out.reshape(batch_size, self.num_agents, self.mpc_weight_dim)
+
+        if self.mpc_fn is not None:
+            # mpc_fn takes (weights, physical_state, reference)
+            # physical_state: (batch, num_agents, 2)
+            # reference: (batch, num_agents, 2)
+            # out: (batch, num_agents, mpc_weight_dim)
+            # We assume mpc_fn is vmapped over both batch and num_agents!
+            actor_mean = self.mpc_fn(out, physical_state, reference)
+        else:
+            actor_mean = out
+
+        actor_mean_flat = actor_mean.reshape(batch_size, self.num_agents * self.env_action_dim_per_agent)
+        log_std = jnp.clip(self.actor_log_std.value, -5.0, 2.0)
+        log_std_flat = log_std.reshape(-1)
+        log_std_flat = jnp.broadcast_to(log_std_flat, actor_mean_flat.shape)
+
+        return distrax.MultivariateNormalDiag(actor_mean_flat, jnp.exp(log_std_flat))
+
+
+class MAPPOTransformerDiffMPCActor(nnx.Module):
+    def __init__(
+        self,
+        local_obs_dim: int,
+        mpc_weight_dim: int,
+        env_action_dim_per_agent: int,
+        num_agents: int,
+        mpc_fn,
+        *,
+        obs_seq_len: int = 1,
+        activation: str = "relu",
+        transformer_hidden_dim: int = 128,
+        num_heads: int = 2,
+        num_encoder_layers: int = 1,
+        ffn_hidden_dim: int = 128,
+        actor_layer_sizes: tuple = (256, 256),
+        max_seq_len: int = 1024,
+        rngs: nnx.Rngs,
+    ):
+        self.local_obs_dim = local_obs_dim
+        self.mpc_weight_dim = mpc_weight_dim
+        self.env_action_dim_per_agent = env_action_dim_per_agent
+        self.num_agents = num_agents
+        self.activation_name = activation
+        self.mpc_fn = mpc_fn
+        self.transformer_hidden_dim = transformer_hidden_dim
+        self.obs_seq_len = obs_seq_len
+        
+        self.input_projection = nnx.Linear(
+            local_obs_dim,
+            transformer_hidden_dim,
+            kernel_init=orthogonal(jnp.sqrt(2)),
+            bias_init=constant(0.0),
+            rngs=rngs,
+        )
+        
+        self.spatial_encoding = SpatialEncoding(
+            transformer_hidden_dim,
+            max_seq_len=max_seq_len,
+            rngs=rngs,
+        )
+        
+        encoder_blocks = []
+        for _ in range(num_encoder_layers):
+            encoder_blocks.append(
+                TransformerEncoderBlock(
+                    feature_dim=transformer_hidden_dim,
+                    num_heads=num_heads,
+                    ffn_hidden_dim=ffn_hidden_dim,
+                    activation=activation,
+                    rngs=rngs,
+                )
+            )
+        self.encoder_blocks = nnx.List(encoder_blocks)
+
+        _layers = []
+        in_dim = transformer_hidden_dim
+        for layer_dim in actor_layer_sizes:
+            _layers.append(
+                nnx.Linear(in_dim, layer_dim, kernel_init=orthogonal(jnp.sqrt(2)), bias_init=constant(0.0), rngs=rngs)
+            )
+            in_dim = layer_dim
+        self.actor_hidden = nnx.List(_layers)
+        self.output_layer = nnx.Linear(
+            in_dim, mpc_weight_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0), rngs=rngs
+        )
+        self.actor_log_std = nnx.Param(jnp.zeros((num_agents, env_action_dim_per_agent)))
+
+    def _encode(self, x, training: bool = False):
+        squeeze_output = False
+        if x.ndim == 2: # (batch*num_agents, obs_dim)
+            x = x[:, None, :] 
+            squeeze_output = True
+        
+        x = self.input_projection(x)
+        x = nnx.tanh(x)
+        x = self.spatial_encoding(x)
+        
+        for encoder_block in self.encoder_blocks:
+            x = encoder_block(x, training=training)
+            
+        if squeeze_output:
+            x = x[:, 0, :]
+            
+        return x
+
+    def __call__(self, local_obs, physical_state=None, reference=None, training: bool = False):
+        activation = nnx.relu if self.activation_name == "relu" else nnx.tanh
+        # local_obs could be (batch, num_agents, seq_len, obs_dim) or (batch, num_agents, obs_dim)
+        if local_obs.ndim == 4:
+            batch_size = local_obs.shape[0]
+            x = local_obs.reshape(batch_size * self.num_agents, self.obs_seq_len, self.local_obs_dim)
+        elif local_obs.ndim == 3:
+            batch_size = local_obs.shape[0]
+            x = local_obs.reshape(batch_size * self.num_agents, self.local_obs_dim)
+        else:
+            raise ValueError(f"Unexpected local_obs shape: {local_obs.shape}")
+
+        encoded = self._encode(x, training=training)
+        if encoded.ndim == 3:
+            # Use the representation of the most recent observation (last token)
+            encoded = encoded[:, -1, :]
+            
+        for layer in self.actor_hidden:
+            encoded = activation(layer(encoded))
+
+        out = self.output_layer(encoded)
+        out = out.reshape(batch_size, self.num_agents, self.mpc_weight_dim)
+
+        if self.mpc_fn is not None:
+            actor_mean = self.mpc_fn(out, physical_state, reference)
+        else:
+            actor_mean = out
+
+        actor_mean_flat = actor_mean.reshape(batch_size, self.num_agents * self.env_action_dim_per_agent)
+        log_std = jnp.clip(self.actor_log_std.value, -5.0, 2.0)
+        log_std_flat = log_std.reshape(-1)
+        log_std_flat = jnp.broadcast_to(log_std_flat, actor_mean_flat.shape)
+
+        return distrax.MultivariateNormalDiag(actor_mean_flat, jnp.exp(log_std_flat))
+class MAPPOTransformerCritic(nnx.Module):
+    """
+    Centralized Critic using a Transformer to process the history sequence of all agents.
+    """
+    def __init__(
+        self,
+        local_obs_dim: int,
+        num_agents: int,
+        *,
+        obs_seq_len: int = 1,
+        activation: str = "relu",
+        transformer_hidden_dim: int = 128,
+        num_heads: int = 2,
+        num_encoder_layers: int = 1,
+        ffn_hidden_dim: int = 128,
+        critic_layer_sizes: tuple = (256, 256),
+        max_seq_len: int = 1024,
+        rngs: nnx.Rngs,
+    ):
+        self.local_obs_dim = local_obs_dim
+        self.num_agents = num_agents
+        self.obs_seq_len = obs_seq_len
+        self.activation_name = activation
+        self.transformer_hidden_dim = transformer_hidden_dim
+
+        # Input dimension for each token in the sequence: N * D_local + 1 (for time_frac)
+        in_token_dim = num_agents * local_obs_dim + 1
+
+        self.input_projection = nnx.Linear(
+            in_token_dim,
+            transformer_hidden_dim,
+            kernel_init=orthogonal(0.01),
+            bias_init=constant(0.0),
+            rngs=rngs,
+        )
+
+        self.spatial_encoding = SpatialEncoding(
+            transformer_hidden_dim,
+            max_seq_len=max_seq_len,
+            rngs=rngs,
+        )
+
+        encoder_blocks = []
+        for _ in range(num_encoder_layers):
+            encoder_blocks.append(
+                TransformerEncoderBlock(
+                    feature_dim=transformer_hidden_dim,
+                    num_heads=num_heads,
+                    ffn_hidden_dim=ffn_hidden_dim,
+                    activation=activation,
+                    rngs=rngs,
+                )
+            )
+        self.encoder_blocks = nnx.List(encoder_blocks)
+
+        _layers = []
+        in_dim = transformer_hidden_dim
+        for layer_dim in critic_layer_sizes:
+            _layers.append(
+                nnx.Linear(in_dim, layer_dim, kernel_init=orthogonal(jnp.sqrt(2)), bias_init=constant(0.0), rngs=rngs)
+            )
+            in_dim = layer_dim
+        self.critic_hidden = nnx.List(_layers)
+        
+        self.output_layer = nnx.Linear(
+            in_dim, 1, kernel_init=orthogonal(1.0), bias_init=constant(0.0), rngs=rngs
+        )
+
+    def _encode(self, x, training: bool = False):
+        x = self.input_projection(x)
+        x = nnx.tanh(x)
+        x = self.spatial_encoding(x)
+        
+        for encoder_block in self.encoder_blocks:
+            x = encoder_block(x, training=training)
+            
+        return x
+
+    def __call__(self, global_state, training: bool = False):
+        """
+        Args:
+            global_state: (batch, N * seq_len * D_local + 1)
+        Returns:
+            (batch,)
+        """
+        batch_size = global_state.shape[0]
+        
+        time_frac = global_state[:, -1:]
+        hist_flat = global_state[:, :-1]
+        
+        # reshape history to (batch, seq_len, N * D_local)
+        hist_seq = hist_flat.reshape(batch_size, self.obs_seq_len, self.num_agents * self.local_obs_dim)
+        
+        time_frac_seq = jnp.broadcast_to(time_frac[:, None, :], (batch_size, self.obs_seq_len, 1))
+        
+        # (batch, seq_len, N * D_local + 1)
+        seq_input = jnp.concatenate([hist_seq, time_frac_seq], axis=-1)
+        
+        encoded = self._encode(seq_input, training=training)
+        
+        # Take the last token
+        if encoded.ndim == 3:
+            encoded = encoded[:, -1, :]
+            
+        x = encoded
+        activation = nnx.relu if self.activation_name == "relu" else nnx.tanh
+        for layer in self.critic_hidden:
+            x = activation(layer(x))
+            
+        out = self.output_layer(x)
+        return jnp.squeeze(out, axis=-1)
+

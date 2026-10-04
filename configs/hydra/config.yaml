@@ -7,8 +7,8 @@ hydra:
   output_subdir: null  # Disables .hydra folder creation     
   
 defaults:
-  - method: diffmpc_transformer_stab
-  - env: drone_v1
+  - method: multi_agent_diffmpc
+  - env: multi_agent_nav
   - override hydra/job_logging: none  # Correct way to disable job logging
   - override hydra/hydra_logging: none  # Correct way to disable hydra logging
   - _self_
@@ -29,7 +29,7 @@ WANDB_SAVE_CODE: false
 # Evaluation loop
 EVAL_ENABLED: true
 EVAL_DURING_TRAINING_ENABLED: true
-EVAL_EVERY_UPDATES: 10
+EVAL_EVERY_UPDATES: 50
 EVAL_RENDER_VIDEO: true
 EVAL_RENDER_DURING_TRAINING: true
 EVAL_RENDER_WIDTH: 640
