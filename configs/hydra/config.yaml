@@ -7,8 +7,8 @@ hydra:
   output_subdir: null  # Disables .hydra folder creation     
   
 defaults:
-  - method: multi_agent_diffmpc
-  - env: multi_agent_nav
+  - method: multi_agent_diffmpc_transformer
+  - env: multi_agent_nav_v2
   - override hydra/job_logging: none  # Correct way to disable job logging
   - override hydra/hydra_logging: none  # Correct way to disable hydra logging
   - _self_
