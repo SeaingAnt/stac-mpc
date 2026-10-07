@@ -1,7 +1,7 @@
 # @package _global_
-# PPO method configuration
+# Multi-Agent DiffMPC Transformer with Stability Regularization
 
-ALGORITHM: multi_agent_diffmpc_transformer
+ALGORITHM: multi_agent_diffmpc_transformer_stab
 # Learning parameters
 LR: 0.003
 UPDATE_EPOCHS: 4
@@ -25,7 +25,7 @@ TRANSFORMER_HIDDEN_DIM: 128
 TRANSFORMER_NUM_HEADS: 2
 TRANSFORMER_NUM_LAYERS: 1
 TRANSFORMER_FFN_HIDDEN_DIM: 128
-REG_COEF: 0.0
+REG_COEF: 0.001
 # Training settings
 ANNEAL_LR: false
 NORMALIZE_ENV: true

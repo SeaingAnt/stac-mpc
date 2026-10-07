@@ -8,6 +8,7 @@ from . import diffmpc_transformer
 from . import diffmpc_transformer_stab
 from . import mappo
 from . import multi_agent_diffmpc_transformer
+from . import multi_agent_diffmpc_transformer_stab
 
 ALGORITHM_REGISTRY = {
     "ppo": ppo.SPEC,
@@ -17,6 +18,7 @@ ALGORITHM_REGISTRY = {
     "diffmpc_transformer_stab": diffmpc_transformer_stab.SPEC,
     "mappo": mappo.SPEC,
     "multi_agent_diffmpc_transformer": multi_agent_diffmpc_transformer.SPEC,
+    "multi_agent_diffmpc_transformer_stab": multi_agent_diffmpc_transformer_stab.SPEC,
 }
 
 __all__ = [

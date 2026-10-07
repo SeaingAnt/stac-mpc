@@ -851,7 +851,7 @@ class MultiAgentActorCritic(nnx.Module):
         in_dim = obs_dim
         for layer_dim in actor_layer_sizes:
             _actor_layers.append(
-                nnx.Linear(in_dim, layer_dim, kernel_init=orthogonal(jnp.sqrt(2)), bias_init=constant(0.0), rngs=rngs)
+                nnx.Linear(in_dim, layer_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0), rngs=rngs)
             )
             in_dim = layer_dim
         self.actor_layers = nnx.List(_actor_layers)
@@ -920,7 +920,7 @@ class MAPPODiffMPCActor(nnx.Module):
         in_dim = local_obs_dim
         for layer_dim in actor_layer_sizes:
             _layers.append(
-                nnx.Linear(in_dim, layer_dim, kernel_init=orthogonal(jnp.sqrt(2)), bias_init=constant(0.0), rngs=rngs)
+                nnx.Linear(in_dim, layer_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0), rngs=rngs)
             )
             in_dim = layer_dim
         self.layers = nnx.List(_layers)
@@ -992,7 +992,7 @@ class MAPPOTransformerDiffMPCActor(nnx.Module):
         self.input_projection = nnx.Linear(
             local_obs_dim,
             transformer_hidden_dim,
-            kernel_init=orthogonal(0.1),
+            kernel_init=orthogonal(1.0),
             bias_init=constant(0.0),
             rngs=rngs,
         )
@@ -1020,12 +1020,12 @@ class MAPPOTransformerDiffMPCActor(nnx.Module):
         in_dim = transformer_hidden_dim
         for layer_dim in actor_layer_sizes:
             _layers.append(
-                nnx.Linear(in_dim, layer_dim, kernel_init=orthogonal(0.1), bias_init=constant(0.0), rngs=rngs)
+                nnx.Linear(in_dim, layer_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0), rngs=rngs)
             )
             in_dim = layer_dim
         self.actor_hidden = nnx.List(_layers)
         self.output_layer = nnx.Linear(
-            in_dim, mpc_weight_dim, kernel_init=orthogonal(0.1), bias_init=constant(0.0), rngs=rngs
+            in_dim, mpc_weight_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0), rngs=rngs
         )
         self.actor_log_std = nnx.Param(jnp.zeros((num_agents, env_action_dim_per_agent)))
 
