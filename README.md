@@ -81,3 +81,12 @@ The core scripts are located in the `transformer_mpc` folder:
   ```bash
   pixi run python transformer_mpc/eval.py
   ```
+
+* **Multi-Agent Scaling Evaluation:** [eval_multiple.py](file:///home/antonio/transformer_mpc/transformer_mpc/eval_multiple.py)  
+  Tests multi-agent policies (`multi_agent_nav_v2`) on a growing number of agents $N$ provided as an argument in the fixed environment size, generating comparative scaling plots, trajectory maps, and metric summaries.
+  ```bash
+  # Example: evaluate on growing number of agents N = 2, 4, 6, 8
+  pixi run python transformer_mpc/eval_multiple.py runs/multi_agent_nav_v2/<RUN_DIR> -N 2 4 6 8
+  ```
+
+

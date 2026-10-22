@@ -517,6 +517,7 @@ def init_networks(config, env, env_params, rng, load_params_fn=None):
         train_state = train_state.replace(params=load_params_fn(train_state.params))
 
     return {
+        "network": actor_network,
         "graphdef": graphdef,
         "train_state": train_state,
         "rngs_state": {"actor": actor_rngs_state, "critic": critic_rngs_state},

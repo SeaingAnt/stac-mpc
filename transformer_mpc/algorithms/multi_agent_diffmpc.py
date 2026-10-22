@@ -91,7 +91,7 @@ def make_mpx_solve_fn(env_dynamics, env_params, horizon, dt, nx, nu, pcg_iters=5
     return solve_fn
 
 
-def solve_mpc(weights, physical_state, reference, env_params, env_dynamics, solve_fn, horizon, dt, nx, nu, mpc_iters=1):
+def solve_mpc(weights, physical_state, reference, env_params, env_dynamics, solve_fn, horizon, dt, nx, nu, mpc_iters=1, return_trajectory=False):
     nominal_hover = jnp.zeros(nu)
 
     W = weights
@@ -132,6 +132,8 @@ def solve_mpc(weights, physical_state, reference, env_params, env_dynamics, solv
         physical_action, -1.0, 1.0
     )
 
+    if return_trajectory:
+        return physical_action, sol_X, sol_U
     return physical_action
 
 
@@ -213,7 +215,67 @@ def make_collect_fn(config, env, env_params, networks):
     return _env_step
 
 
+def compute_contraction_metric_pure_jax(
+    A_seq, B_seq, Q_seq, R_seq, tol=1e-5, max_iters=50
+):
+    A_T = A_seq[-1]
+    B_T = B_seq[-1]
+    Q_T = Q_seq[-1]
+    R_T = R_seq[-1]
+
+    def dare_step(carry, _):
+        M_curr = carry
+        R_tilde = R_T + B_T.T @ M_curr @ B_T
+        cross_term = B_T.T @ M_curr @ A_T
+        K_gain = jax.scipy.linalg.solve(R_tilde, cross_term, assume_a="pos")
+        M_next = A_T.T @ M_curr @ A_T - (A_T.T @ M_curr @ B_T) @ K_gain + Q_T
+        return M_next, None
+
+    M_T, _ = jax.lax.scan(dare_step, Q_T, None, length=max_iters)
+
+    def dre_step(M_next, inputs):
+        A_i, B_i, Q_i, R_i = inputs
+        R_tilde = R_i + B_i.T @ M_next @ B_i
+        cross_term = B_i.T @ M_next @ A_i
+        K_i = jax.scipy.linalg.solve(R_tilde, cross_term, assume_a="pos")
+        M_curr = A_i.T @ M_next @ A_i - (A_i.T @ M_next @ B_i) @ K_i + Q_i
+        return M_curr, None
+
+    inputs_reversed = (
+        A_seq[:-1][::-1],
+        B_seq[:-1][::-1],
+        Q_seq[:-1][::-1],
+        R_seq[:-1][::-1],
+    )
+
+    M_0, _ = jax.lax.scan(dre_step, M_T, inputs_reversed)
+    return M_0
+
+
 def make_loss_fn(config, graphdef, *args, **kwargs):
+    env = kwargs.get("env")
+    env_params = kwargs.get("env_params")
+
+    nx = 2
+    nu = 2
+    horizon = getattr(env_params, "mpc_horizon", config.get("MPC_HORIZON", 10))
+    dt = getattr(env_params, "dt", 0.1) if env_params else 0.1
+
+    env_dynamics = env.mpc_dynamics(nx, nu, env_params) if env else None
+
+    if env and env_params:
+        solve_fn = make_mpx_solve_fn(
+            env_dynamics=env_dynamics,
+            env_params=env_params,
+            horizon=horizon,
+            dt=dt,
+            nx=nx,
+            nu=nu,
+            pcg_iters=config.get("MPC_PCG_ITERS", 50),
+        )
+    else:
+        solve_fn = None
+
     def _loss_fn(params, traj_batch, advantages, targets):
         actor_model = nnx.merge(graphdef["actor"], params["actor"])
         critic_model = nnx.merge(graphdef["critic"], params["critic"])
@@ -233,6 +295,7 @@ def make_loss_fn(config, graphdef, *args, **kwargs):
         value_loss = 0.5 * jnp.maximum(value_losses, value_losses_clipped).mean()
 
         log_ratio = log_prob - traj_batch.log_prob
+        log_ratio = jnp.clip(log_ratio, -5.0, 5.0)
         ratio = jnp.exp(log_ratio)
 
         old_approx_kl = (-log_ratio).mean()
@@ -253,8 +316,90 @@ def make_loss_fn(config, graphdef, *args, **kwargs):
         loss_actor = loss_actor.mean()
         entropy = pi.entropy().mean()
 
+        reg_loss = 0.0
+
+        if solve_fn is not None:
+            batch_size = physical_state.shape[0]
+            num_agents = physical_state.shape[1]
+
+            local_obs = traj_batch.obs["local_obs"]
+            activation = nnx.relu if actor_model.activation_name == "relu" else nnx.tanh
+
+            x_enc = local_obs[:, :, -1, :] if local_obs.ndim == 4 else local_obs
+            x_enc = x_enc.reshape(batch_size * num_agents, actor_model.local_obs_dim)
+
+            for layer in actor_model.layers:
+                x_enc = activation(layer(x_enc))
+            weights_matrix = actor_model.output_layer(x_enc)
+
+            weights_flat = weights_matrix
+            phys_flat = physical_state.reshape(batch_size * num_agents, nx)
+            ref_flat = reference.reshape(batch_size * num_agents, nx)
+
+            def get_linearizations_and_metric(w, p_state, ref):
+                w_stop = jax.lax.stop_gradient(w)
+                p_state_stop = jax.lax.stop_gradient(p_state)
+                ref_stop = jax.lax.stop_gradient(ref)
+
+                _, X, U = solve_mpc(
+                    w_stop,
+                    p_state_stop,
+                    ref_stop,
+                    env_params,
+                    env_dynamics,
+                    solve_fn,
+                    horizon,
+                    dt,
+                    nx,
+                    nu,
+                    mpc_iters=config.get("MPC_ITERS", 1),
+                    return_trajectory=True,
+                )
+
+                def single_step_dyn(x, u):
+                    dx = env_dynamics.state_dot(x, u, None)
+                    x_mid = x + (dt / 2.0) * dx
+                    dx_mid = env_dynamics.state_dot(x_mid, u, None)
+                    x_next = x + dt * dx_mid
+                    return x_next
+
+                def step_error_dyn(delta_x, delta_u, x_nom, u_nom):
+                    x_p = x_nom + delta_x
+                    u_p = u_nom + delta_u
+                    x_next_p = single_step_dyn(x_p, u_p)
+                    x_next_nom = single_step_dyn(x_nom, u_nom)
+                    return x_next_p - x_next_nom
+
+                def get_AB(x_nom, u_nom):
+                    jac_fn = jax.jacfwd(step_error_dyn, argnums=(0, 1))
+                    return jac_fn(jnp.zeros(nx), jnp.zeros(nu), x_nom, u_nom)
+
+                A_seq, B_seq = jax.vmap(get_AB)(X[:horizon], U)
+
+                half_dim = horizon * (nx + nu)
+                Q_R_traj = jnp.clip(jax.nn.softplus(w[:half_dim]) * 10.0, 0.0, 100.0)
+                Q_R_traj = Q_R_traj.reshape((horizon, nx + nu))
+                Q_seq = jax.vmap(jnp.diag)(Q_R_traj[:, :nx] + 0.05)
+                R_seq = jax.vmap(jnp.diag)(Q_R_traj[:, nx:] + 0.05)
+
+                M_0 = compute_contraction_metric_pure_jax(A_seq, B_seq, Q_seq, R_seq)
+
+                eigenvalues, _ = jnp.linalg.eigh(M_0)
+                eps = 1e-6
+                c_max = jnp.sqrt(jnp.maximum(eigenvalues[-1], eps))
+
+                return c_max
+
+            c_max = jax.vmap(get_linearizations_and_metric)(weights_flat, phys_flat, ref_flat)
+
+            rho_mpc = jnp.sqrt(jnp.maximum(1 - 0.1 / (c_max**2 + 1e-6), 1e-6))
+            reg_loss += jnp.mean(jnp.maximum(0.0, rho_mpc - 0.99))
+
+        reg_coef = config.get("REG_COEF", 0.01)
+        reg_loss = jnp.minimum(reg_loss, 3e5)
+
         total_loss = (
-            loss_actor + config["VF_COEF"] * value_loss - config["ENT_COEF"] * entropy
+            loss_actor + config["VF_COEF"] * value_loss - config["ENT_COEF"] * entropy + reg_coef * reg_loss
         )
         return total_loss, (
             value_loss,
@@ -263,6 +408,7 @@ def make_loss_fn(config, graphdef, *args, **kwargs):
             old_approx_kl,
             approx_kl,
             clipfracs,
+            reg_loss,
         )
 
     return _loss_fn
@@ -314,7 +460,7 @@ def calculate_gae(config, traj_batch, networks, collect_state):
 
 def extract_losses(loss_info):
     total_loss, aux = loss_info
-    value_loss, loss_actor, entropy, old_approx_kl, approx_kl, clipfracs = aux
+    value_loss, loss_actor, entropy, old_approx_kl, approx_kl, clipfracs, reg_loss = aux
 
     losses = {
         "total": total_loss.mean(),
@@ -325,7 +471,7 @@ def extract_losses(loss_info):
         "approx_kl": approx_kl.mean(),
         "clipfrac": clipfracs.mean(),
     }
-    return losses, {}
+    return losses, {"reg": reg_loss.mean()}
 
 
 def init_networks(config, env, env_params, rng, load_params_fn=None):

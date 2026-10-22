@@ -26,8 +26,9 @@ from flax import nnx, serialization
 from algorithms import ALGORITHM_REGISTRY
 from env import ENV_REGISTRY
 from env.math import quat2rotm
-from train import _build_deterministic_eval_step
+from algorithms.base import _policy_dist_from_model
 from env.wrappers import EvalVideoWrapper
+from buffers import RunnerState
 
 STRONG_COLORS = [
     "#d62728",
@@ -43,43 +44,261 @@ STRONG_COLORS = [
 ]
 
 
+def _build_deterministic_eval_step(config, graphdef, rngs_state, env, env_params):
+    """Create deterministic env-step function for evaluation rollouts."""
+
+    def get_physical_state(state):
+        def _get_base_state(s):
+            if hasattr(s, "pos"):
+                return s
+            if hasattr(s, "state") and hasattr(s.state, "pos"):
+                return s.state
+            if hasattr(s, "env_state"):
+                return _get_base_state(s.env_state)
+            return None
+
+        base = _get_base_state(state)
+        if base is None:
+            return None
+        return jnp.concatenate([base.pos, base.attitude, base.vel, base.omega], axis=-1)
+
+    def _eval_step(model, eval_state: RunnerState, _unused):
+        rng, model_rng = jax.random.split(eval_state.rng)
+        
+        if "DIFFMPC" in config.get("ALGORITHM", "").upper():
+            physical_state = get_physical_state(eval_state.env_state)
+            
+            obs = eval_state.last_obs
+            if isinstance(obs, dict) and "local_obs" in obs:
+                obs = obs["local_obs"]
+                
+            model_out = model(obs, physical_state=physical_state)
+            pi = model_out[0] if isinstance(model_out, tuple) else model_out
+        else:
+            pi = _policy_dist_from_model(model, eval_state.last_obs, model_rng)
+            
+        action = pi.mode()
+
+        rng, step_rng = jax.random.split(rng)
+        rng_step = jax.random.split(step_rng, config["NUM_ENVS"])
+        obsv, env_state, _reward, _done, info = env.step(
+            rng_step, eval_state.env_state, action, env_params
+        )
+
+        new_eval_state = RunnerState(
+            train_state=eval_state.train_state,
+            env_state=env_state,
+            last_obs=obsv,
+            rng=rng,
+            extras=eval_state.extras,
+        )
+        return new_eval_state, (info, env_state)
+
+    return _eval_step
+
+
+def _save_combined_multi_agent_error_trajectory_plot(runs_data, output_path):
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    for i, item in enumerate(runs_data):
+        if len(item) == 3:
+            env_state_batch, info_batch, label = item
+        else:
+            env_state_batch, label = item
+            info_batch = {}
+
+        env_state_batch = jax.tree_util.tree_map(jax.device_get, env_state_batch)
+        info_batch = jax.tree_util.tree_map(jax.device_get, info_batch)
+
+        while hasattr(env_state_batch, "env_state"):
+            env_state_batch = env_state_batch.env_state
+
+        model_state = getattr(env_state_batch, "state", env_state_batch)
+        positions = np.asarray(model_state.pos)
+        target_pos = np.asarray(env_state_batch.target)
+
+        returned_episode = (
+            np.asarray(info_batch["returned_episode"])
+            if "returned_episode" in info_batch
+            else None
+        )
+
+        if "terminal_pos" in info_batch:
+            terminal_positions = np.asarray(info_batch["terminal_pos"])
+        else:
+            terminal_positions = positions
+
+        collisions = (
+            np.asarray(info_batch["collision"])
+            if "collision" in info_batch
+            else None
+        )
+
+        num_steps = positions.shape[0]
+        num_envs = positions.shape[1] if positions.ndim > 2 else 1
+        num_agents = positions.shape[2] if positions.ndim > 3 else 1
+
+        color = STRONG_COLORS[i % len(STRONG_COLORS)]
+        clean_trajectories = []
+
+        for env_idx in range(num_envs):
+            if returned_episode is not None:
+                env_returns = (
+                    returned_episode[:, env_idx]
+                    if returned_episode.ndim > 1
+                    else returned_episode
+                )
+                done_steps = np.where(env_returns)[0].tolist()
+            else:
+                done_steps = []
+
+            if len(done_steps) > 0:
+                first_done_idx = min(done_steps[0], len(positions) - 1)
+                env_pos = np.zeros(
+                    (first_done_idx + 1, num_agents, positions.shape[-1]),
+                    dtype=positions.dtype,
+                )
+                env_pos[:first_done_idx] = positions[:first_done_idx, env_idx]
+                env_pos[first_done_idx] = terminal_positions[first_done_idx, env_idx]
+                has_collided = (
+                    bool(np.any(collisions[: first_done_idx + 1, env_idx]))
+                    if collisions is not None
+                    else False
+                )
+            else:
+                first_done_idx = len(positions) - 1
+                env_pos = positions[:, env_idx]
+                has_collided = (
+                    bool(np.any(collisions[:, env_idx]))
+                    if collisions is not None
+                    else False
+                )
+
+            # Only retain trajectories that did not collide
+            if has_collided:
+                continue
+
+            env_target = (
+                target_pos[0, env_idx]
+                if target_pos.ndim == 4
+                else target_pos[env_idx]
+            )
+
+            # Euclidean error of each agent with respect to its target at each step
+            diff = env_pos - env_target[None, :, :]
+            agent_dist = np.linalg.norm(diff, axis=-1)  # shape: (T, num_agents)
+            team_dist = agent_dist.mean(axis=-1)        # shape: (T,)
+
+            clean_trajectories.append(team_dist)
+
+        if len(clean_trajectories) == 0:
+            print(f"Notice for plot: Policy '{label}' has 0 non-colliding trajectories.")
+            ax.plot([], [], color=color, linestyle="--", label=f"{label} (0/{num_envs} clean)")
+            continue
+
+        # Plot individual non-colliding trajectories
+        for traj in clean_trajectories:
+            ax.plot(
+                np.arange(len(traj)),
+                traj,
+                color=color,
+                alpha=0.15,
+                linewidth=0.9,
+            )
+
+        # Compute mean and standard deviation across non-colliding trajectories
+        max_len = max(len(t) for t in clean_trajectories)
+        time_axis = np.arange(max_len)
+        mean_curve = np.zeros(max_len)
+        std_curve = np.zeros(max_len)
+
+        for t in range(max_len):
+            vals = [traj[t] for traj in clean_trajectories if t < len(traj)]
+            mean_curve[t] = np.mean(vals)
+            std_curve[t] = np.std(vals) if len(vals) > 1 else 0.0
+
+        clean_label = f"{label} ({len(clean_trajectories)}/{num_envs} clean)"
+        ax.plot(time_axis, mean_curve, color=color, linewidth=2.5, label=clean_label)
+        ax.fill_between(
+            time_axis,
+            np.maximum(mean_curve - std_curve, 0.0),
+            mean_curve + std_curve,
+            color=color,
+            alpha=0.2,
+        )
+
+    ax.set_xlabel("Step", fontsize=16)
+    ax.set_ylabel("Distance to target [m]", fontsize=16)
+    ax.set_title("Multi-agent error to target over time (non-colliding)", fontsize=18)
+    ax.tick_params(axis="both", which="major", labelsize=14)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper right", fontsize=14)
+    ax.set_ylim(bottom=-0.05)
+
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    print(f"Saved multi-agent error trajectory plot to {output_path}")
+
+
 def _save_combined_error_trajectory_plot(runs_data, output_path):
     import numpy as np
     import matplotlib.pyplot as plt
 
+    sample_state = runs_data[0][0]
+    while hasattr(sample_state, "env_state"):
+        sample_state = sample_state.env_state
+    if hasattr(sample_state, "target"):
+        return _save_combined_multi_agent_error_trajectory_plot(runs_data, output_path)
+
     fig, (ax_pos, ax_yaw) = plt.subplots(2, 1, figsize=(7, 7), sharex=True)
 
-    for i, (env_state_batch, label) in enumerate(runs_data):
+    for i, item in enumerate(runs_data):
+        env_state_batch = item[0]
+        label = item[-1]
         env_state_batch = jax.tree_util.tree_map(jax.device_get, env_state_batch)
 
         while hasattr(env_state_batch, "env_state"):
             env_state_batch = env_state_batch.env_state
 
-        model_state = env_state_batch.state
-        target_pos = np.asarray(env_state_batch.target_pos)
-        target_yaw = np.asarray(env_state_batch.target_yaw)
-
-        positions = np.asarray(model_state.pos)
-        attitudes = np.asarray(model_state.attitude)
+        model_state = getattr(env_state_batch, "state", env_state_batch)
+        
+        has_yaw = False
+        if hasattr(env_state_batch, "target"):
+            target_pos = np.asarray(env_state_batch.target)
+            positions = np.asarray(model_state.pos)
+        else:
+            target_pos = np.asarray(env_state_batch.target_pos)
+            positions = np.asarray(model_state.pos)
+            target_yaw = np.asarray(env_state_batch.target_yaw)
+            attitudes = np.asarray(model_state.attitude)
+            has_yaw = True
 
         pos_error = np.linalg.norm(positions - target_pos, axis=-1)
+        if pos_error.ndim == 3:  # (steps, envs, agents)
+            pos_error = pos_error.mean(axis=-1)
 
-        q = attitudes
-        current_yaw = np.arctan2(
-            2.0 * (q[..., 0] * q[..., 3] + q[..., 1] * q[..., 2]),
-            1.0 - 2.0 * (q[..., 2] ** 2 + q[..., 3] ** 2),
-        )
-        yaw_error = np.abs(
-            np.arctan2(
-                np.sin(current_yaw - target_yaw), np.cos(current_yaw - target_yaw)
+        if has_yaw:
+            q = attitudes
+            current_yaw = np.arctan2(
+                2.0 * (q[..., 0] * q[..., 3] + q[..., 1] * q[..., 2]),
+                1.0 - 2.0 * (q[..., 2] ** 2 + q[..., 3] ** 2),
             )
-        )
+            yaw_error = np.abs(
+                np.arctan2(
+                    np.sin(current_yaw - target_yaw), np.cos(current_yaw - target_yaw)
+                )
+            )
+            yaw_mean = yaw_error.mean(axis=1)
+            yaw_std = yaw_error.std(axis=1)
 
         time_axis = np.arange(pos_error.shape[0])
         pos_mean = pos_error.mean(axis=1)
         pos_std = pos_error.std(axis=1)
-        yaw_mean = yaw_error.mean(axis=1)
-        yaw_std = yaw_error.std(axis=1)
 
         color = STRONG_COLORS[i % len(STRONG_COLORS)]
 
@@ -91,13 +310,14 @@ def _save_combined_error_trajectory_plot(runs_data, output_path):
                 alpha=0.1,
                 linewidth=0.9,
             )
-            ax_yaw.plot(
-                time_axis,
-                yaw_error[:, episode_idx],
-                color=color,
-                alpha=0.1,
-                linewidth=0.9,
-            )
+            if has_yaw:
+                ax_yaw.plot(
+                    time_axis,
+                    yaw_error[:, episode_idx],
+                    color=color,
+                    alpha=0.1,
+                    linewidth=0.9,
+                )
 
         ax_pos.plot(
             time_axis, pos_mean, color=color, linewidth=2, label=f"Distance ({label})"
@@ -108,12 +328,13 @@ def _save_combined_error_trajectory_plot(runs_data, output_path):
 
         ax_pos.set_ylim(-0.2, 5.0) 
 
-        ax_yaw.plot(
-            time_axis, yaw_mean, color=color, linewidth=2, label=f"Yaw ({label})"
-        )
-        ax_yaw.fill_between(
-            time_axis, jnp.clip(yaw_mean - yaw_std, 0, 100), yaw_mean + yaw_std, color=color, alpha=0.2
-        )
+        if has_yaw:
+            ax_yaw.plot(
+                time_axis, yaw_mean, color=color, linewidth=2, label=f"Yaw ({label})"
+            )
+            ax_yaw.fill_between(
+                time_axis, jnp.clip(yaw_mean - yaw_std, 0, 100), yaw_mean + yaw_std, color=color, alpha=0.2
+            )
 
     ax_pos.set_ylabel("Position error [m]", fontsize=16)
     ax_pos.set_title("Tracking error over time", fontsize=18)
@@ -184,6 +405,192 @@ def _draw_transparent_quadrotor(ax, pos, attitude, alpha=0.2, color="k"):
         alpha=alpha,
         linewidth=2,
     )
+
+
+def _save_combined_collision_rate_bar_plot(runs_data, output_path):
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    labels = []
+    rates = []
+
+    for _, info_batch, label in runs_data:
+        info_batch = jax.tree_util.tree_map(jax.device_get, info_batch)
+        if "collision" in info_batch:
+            collisions = np.asarray(info_batch["collision"])
+            returned_episode = np.asarray(info_batch["returned_episode"])
+            num_done = np.sum(returned_episode)
+            rate = (np.sum(collisions) / num_done * 100) if num_done > 0 else 0.0
+        else:
+            rate = 0.0
+        labels.append(label)
+        rates.append(rate)
+
+    fig, ax = plt.subplots(figsize=(max(6, 2 * len(labels)), 6))
+    bars = ax.bar(labels, rates, color=STRONG_COLORS[:len(labels)], alpha=0.8, edgecolor='black', linewidth=1.5)
+    
+    ax.set_ylabel("Collision Rate (%)", fontsize=16)
+    ax.set_title("Collision Rate per Policy", fontsize=18)
+    ax.tick_params(axis="both", which="major", labelsize=14)
+    ax.grid(True, alpha=0.3, axis='y')
+    ax.set_ylim([0, max(max(rates) * 1.2, 5.0)])
+
+    # Annotate bars
+    for bar, rate in zip(bars, rates):
+        height = bar.get_height()
+        ax.text(
+            bar.get_x() + bar.get_width() / 2.0,
+            height + 0.1,
+            f"{rate:.1f}%",
+            ha='center', va='bottom', fontsize=14
+        )
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=300)
+    plt.close(fig)
+
+def _save_combined_trajectory_2d_plot(runs_data, output_path, env_params=None):
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as patches
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+
+    arena_size = float(getattr(env_params, "arena_size", 3.0)) if env_params else 3.0
+    robot_radius = float(getattr(env_params, "robot_radius", 0.15)) if env_params else 0.15
+
+    ax.set_xlim([0, arena_size])
+    ax.set_ylim([0, arena_size])
+
+    ax.set_xlabel("X [m]", fontsize=16)
+    ax.set_ylabel("Y [m]", fontsize=16)
+    ax.set_title("2D trajectory with ghost motion", fontsize=18)
+    ax.tick_params(axis="both", which="major", labelsize=14)
+    ax.grid(True, linestyle=":", alpha=0.3)
+
+    linestyles = ['-', '--', '-.', ':']
+    colors = plt.colormaps['tab10'](np.linspace(0, 1, 10))
+
+    plotted_targets = set()
+
+    for run_idx, (env_state_batch, info_batch, label) in enumerate(runs_data):
+        env_state_batch = jax.tree_util.tree_map(jax.device_get, env_state_batch)
+        info_batch = jax.tree_util.tree_map(jax.device_get, info_batch)
+
+        while hasattr(env_state_batch, "env_state"):
+            env_state_batch = env_state_batch.env_state
+
+        model_state = getattr(env_state_batch, "state", env_state_batch)
+        positions = np.asarray(model_state.pos)
+        returned_episode = np.asarray(info_batch["returned_episode"])
+
+        if "terminal_pos" in info_batch:
+            terminal_positions = np.asarray(info_batch["terminal_pos"])
+        else:
+            terminal_positions = positions
+
+        target_pos = np.asarray(env_state_batch.target)
+        num_agents = positions.shape[2]
+        style = linestyles[run_idx % len(linestyles)]
+
+        num_envs = positions.shape[1]
+        for env_idx in range(num_envs):
+            env_returns = (
+                returned_episode[:, env_idx]
+                if returned_episode.ndim > 1
+                else returned_episode
+            )
+            done_steps = np.where(env_returns)[0].tolist()
+            if len(done_steps) > 0:
+                first_done_idx = min(done_steps[0], len(positions) - 1)
+                env_pos = np.zeros(
+                    (first_done_idx + 1, num_agents, 2), dtype=positions.dtype
+                )
+                env_pos[:first_done_idx] = positions[:first_done_idx, env_idx]
+                env_pos[first_done_idx] = terminal_positions[first_done_idx, env_idx]
+                env_target = target_pos[first_done_idx, env_idx]
+            else:
+                env_pos = positions[:, env_idx]
+                env_target = target_pos[-1, env_idx]
+
+            for agent_idx in range(num_agents):
+                agent_pos = env_pos[:, agent_idx]
+                c = colors[agent_idx % len(colors)]
+                
+                # Label only for the first agent to avoid legendary clutter, or label the policy
+                ax.plot(
+                    agent_pos[:, 0],
+                    agent_pos[:, 1],
+                    color=c,
+                    alpha=0.7,
+                    linewidth=2.0,
+                    linestyle=style,
+                    label=f"{label}" if (agent_idx == 0 and env_idx == 0) else "",
+                )
+
+                # Draw ghost robot circles along trajectory
+                t_steps = len(agent_pos)
+                if t_steps > 1:
+                    ghost_step = max(1, t_steps // 8)
+                    ghost_indices = list(range(0, t_steps - 1, ghost_step))
+                    alphas = np.linspace(0.10, 0.45, len(ghost_indices))
+                    for g_i, g_idx in enumerate(ghost_indices):
+                        ghost_circle = patches.Circle(
+                            (agent_pos[g_idx, 0], agent_pos[g_idx, 1]),
+                            robot_radius,
+                            edgecolor=c,
+                            facecolor=c,
+                            alpha=float(alphas[g_i]),
+                            linewidth=1.0,
+                            zorder=2,
+                        )
+                        ax.add_patch(ghost_circle)
+
+                # Start marker
+                ax.scatter(
+                    agent_pos[0, 0],
+                    agent_pos[0, 1],
+                    color=c,
+                    marker="o",
+                    s=40,
+                    facecolors="white",
+                    edgecolors=c,
+                    linewidths=1.5,
+                    zorder=5,
+                )
+
+                # Final robot solid disc
+                final_circle = patches.Circle(
+                    (agent_pos[-1, 0], agent_pos[-1, 1]),
+                    robot_radius,
+                    edgecolor="black",
+                    facecolor=c,
+                    alpha=0.9,
+                    linewidth=1.5,
+                    zorder=5,
+                )
+                ax.add_patch(final_circle)
+
+                # Plot targets only once per agent
+                t_pos = tuple(np.round(env_target[agent_idx], 3))
+                if t_pos not in plotted_targets:
+                    ax.scatter(
+                        t_pos[0],
+                        t_pos[1],
+                        color=c,
+                        marker="x",
+                        s=120,
+                        linewidths=2.5,
+                        zorder=6,
+                        label="Target" if len(plotted_targets) == 0 else "",
+                    )
+                    plotted_targets.add(t_pos)
+
+    ax.legend(loc="upper right", fontsize=12)
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
 
 
 def _save_combined_trajectory_3d_plot(runs_data, output_path, step_every=50, env_params=None):
@@ -266,7 +673,7 @@ def _save_combined_trajectory_3d_plot(runs_data, output_path, step_every=50, env
                 segment_positions[:, 1],
                 segment_positions[:, 2],
                 color=color,
-                alpha=0.5,
+                alpha=0.3,
                 linestyle="-",
                 label=plot_label,
             )
@@ -281,7 +688,7 @@ def _save_combined_trajectory_3d_plot(runs_data, output_path, step_every=50, env
                         target_pos[0],
                         target_pos[1],
                         target_pos[2],
-                        color="green",
+                        color="orange",
                         marker="x",
                         s=100,
                     )
@@ -306,7 +713,7 @@ def _save_combined_trajectory_3d_plot(runs_data, output_path, step_every=50, env
                     ax.plot_surface(
                         x, y, z,
                         color="yellow",
-                        alpha=0.15,
+                        alpha=0.25,
                     )
                     plotted_obstacles.add(obstacle_key)
 
@@ -376,8 +783,18 @@ def run_eval_loop_python(
     @jax.jit
     def add_noise(state, noise_std):
         rng, noise_rng = jax.random.split(state.rng)
-        noise = jax.random.normal(noise_rng, state.last_obs.shape) * noise_std
-        return state._replace(last_obs=state.last_obs + noise, rng=rng)
+        
+        def _add_noise(leaf, key):
+            if isinstance(leaf, jax.Array) and jnp.issubdtype(leaf.dtype, jnp.floating):
+                return leaf + jax.random.normal(key, leaf.shape) * noise_std
+            return leaf
+            
+        leaves, treedef = jax.tree_util.tree_flatten(state.last_obs)
+        rngs = jax.random.split(noise_rng, len(leaves))
+        new_leaves = [_add_noise(l, r) for l, r in zip(leaves, rngs)]
+        new_obs = jax.tree_util.tree_unflatten(treedef, new_leaves)
+        
+        return state._replace(last_obs=new_obs, rng=rng)
 
     print("Running evaluation step by step...")
     for i in range(config["NUM_STEPS"]):
@@ -431,12 +848,16 @@ def run_eval_loop_python(
     return metrics, env_state_batch, info_batch
 
 
-def load_params_from_msgpack(train_state, msgpack_bytes):
-    # Depending on the algorithm, the train_state params might just be the full state or a subset.
-    # We will load the pure dict form from the msgpack file and match it to params.to_pure_dict()
-    empty_pure_dict = train_state.params.to_pure_dict()
-    loaded_pure_dict = serialization.from_bytes(empty_pure_dict, msgpack_bytes)
-    return nnx.State(loaded_pure_dict)
+def load_params_from_msgpack(train_state, msgpack_bytes, is_nnx=False):
+    if hasattr(train_state.params, "to_pure_dict"):
+        empty_pure_dict = train_state.params.to_pure_dict()
+        loaded_pure_dict = serialization.from_bytes(empty_pure_dict, msgpack_bytes)
+        return nnx.State(loaded_pure_dict)
+    else:
+        loaded_pure_dict = serialization.from_bytes(train_state.params, msgpack_bytes)
+        if is_nnx:
+            return nnx.State(loaded_pure_dict)
+        return loaded_pure_dict
 
 
 def main():
@@ -455,6 +876,24 @@ def main():
         type=float,
         default=0.0,
         help="Standard deviation of Gaussian noise added to observations",
+    )
+    parser.add_argument(
+        "--state_noise",
+        type=float,
+        default=0.0,
+        help="Bound for uniform noise added to the state/velocity",
+    )
+    parser.add_argument(
+        "--same_start",
+        action="store_true",
+        help="If set, all parallel evaluation episodes will start from the exact same initial state",
+    )
+    parser.add_argument(
+        "--scenario",
+        type=str,
+        default="random",
+        choices=["random", "cross", "corners"],
+        help="Initial scenario for multi-agent environment ('cross' / 'corners' spawns 4 agents at 4 corners heading to opposite corners)",
     )
     parser.add_argument(
         "--labels",
@@ -487,15 +926,17 @@ def main():
         with open(config_path, "r") as f:
             config = json.load(f)
 
-        if env_name is None:
-            env_name = config["ENV_NAME"]
-            base_env = ENV_REGISTRY[config["ENV_NAME"]](**config.get("ENV_KWARGS", {}))
-            env_params = base_env.default_params
-            env_params = env_params.replace(is_testing=True)
-        elif env_name != config["ENV_NAME"]:
-            raise ValueError(
-                f"Runs must come from the same environment. Found {env_name} and {config['ENV_NAME']}"
-            )
+        env_name = config["ENV_NAME"]
+        base_env = ENV_REGISTRY[config["ENV_NAME"]](**config.get("ENV_KWARGS", {}))
+        env_params = base_env.default_params
+        
+        replace_kwargs = {"is_testing": True}
+        if hasattr(env_params, "state_noise_bound"):
+            replace_kwargs["state_noise_bound"] = args.state_noise
+        if hasattr(env_params, "scenario"):
+            replace_kwargs["scenario"] = args.scenario
+        
+        env_params = env_params.replace(**replace_kwargs)
 
         # For evaluation we only need this many environments
         config["NUM_ENVS"] = args.episodes
@@ -510,24 +951,71 @@ def main():
 
         env = spec.wrap_env(base_env, config)
 
-        rng = jax.random.PRNGKey(config.get("SEED", 30))
+        # Force a consistent seed for evaluation so runs are perfectly comparable
+        rng = jax.random.PRNGKey(42)
         rng, init_rng = jax.random.split(rng)
 
         networks = spec.init_networks(config, env, env_params, init_rng)
 
         # Reload parameters into the train state
         msgpack_bytes = params_path.read_bytes()
+        is_nnx = "graphdef" in networks
         networks["train_state"] = networks["train_state"].replace(
-            params=load_params_from_msgpack(networks["train_state"], msgpack_bytes)
+            params=load_params_from_msgpack(networks["train_state"], msgpack_bytes, is_nnx)
         )
 
-        graphdef = networks["graphdef"]
+        graphdef = networks.get("graphdef")
         rngs_state = networks.get("rngs_state", {})
 
-        eval_step_fn = _build_deterministic_eval_step(
-            config, graphdef, rngs_state, env, env_params
-        )
-        eval_step_fn_jit = jax.jit(eval_step_fn)
+        if hasattr(spec, "make_eval_step"):
+            eval_step_fn = spec.make_eval_step(
+                config, graphdef, env, env_params, rngs_state=rngs_state
+            )
+        else:
+            eval_step_fn = _build_deterministic_eval_step(
+                config, graphdef, rngs_state, env, env_params
+            )
+        
+        if is_nnx:
+            import inspect
+            eval_step_fn_inner = nnx.jit(eval_step_fn)
+            
+            sig = inspect.signature(eval_step_fn)
+            takes_model = len(sig.parameters) == 3
+
+            if "network" in networks:
+                model = networks["network"]
+                # Update the model with loaded parameters
+                params_to_load = networks["train_state"].params
+                if "actor" in params_to_load:
+                    params_to_load = params_to_load["actor"]
+                nnx.update(model, params_to_load)
+            elif takes_model:
+                raise RuntimeError("eval_step_fn expects 'model' as first argument, but 'network' not found in networks")
+            
+            def eval_step_fn_jit(eval_state, _unused):
+                if takes_model:
+                    new_eval_state, (info, env_state) = eval_step_fn_inner(model, eval_state, _unused)
+                else:
+                    new_eval_state, (info, env_state) = eval_step_fn_inner(eval_state, _unused)
+                return new_eval_state, (info, env_state)
+        else:
+            eval_step_fn_inner = jax.jit(eval_step_fn)
+            def eval_step_fn_jit(eval_state, _unused):
+                return eval_step_fn_inner(eval_state.train_state.apply_fn, eval_state, _unused)
+
+        if args.same_start:
+            class SameStartWrapper:
+                def __init__(self, env):
+                    self._env = env
+                def __getattr__(self, name):
+                    return getattr(self._env, name)
+                def reset(self, rng, params):
+                    first_rng = rng[0]
+                    same_rngs = jnp.tile(first_rng, (rng.shape[0], 1))
+                    return self._env.reset(same_rngs, params)
+            
+            env = SameStartWrapper(env)
 
         # Get runner state for evaluation.
         rng, reset_rng = jax.random.split(rng)
@@ -567,10 +1055,28 @@ def main():
         trajectory_plot_path = plot_dir / "combined_eval_trajectory_3d.png"
 
         print(f"Generating combined plots in {plot_dir}...")
-        _save_combined_error_trajectory_plot(
-            [(data[0], data[2]) for data in runs_data], error_plot_path
-        )
-        _save_combined_trajectory_3d_plot(runs_data, trajectory_plot_path, env_params=env_params)
+        try:
+            # Check if we are in Nav (2D) or Drone (3D)
+            sample_state = runs_data[0][0]
+            while hasattr(sample_state, "env_state"):
+                sample_state = sample_state.env_state
+            
+            if hasattr(sample_state, "target"):
+                trajectory_plot_path = plot_dir / "combined_eval_trajectory_2d.png"
+                _save_combined_trajectory_2d_plot(runs_data, trajectory_plot_path, env_params=env_params)
+                
+                bar_plot_path = plot_dir / "combined_eval_collision_rate.png"
+                _save_combined_collision_rate_bar_plot(runs_data, bar_plot_path)
+
+                error_plot_path = plot_dir / "combined_eval_error_trajectory.png"
+                _save_combined_multi_agent_error_trajectory_plot(runs_data, error_plot_path)
+            else:
+                _save_combined_error_trajectory_plot(
+                    [(data[0], data[2]) for data in runs_data], error_plot_path
+                )
+                _save_combined_trajectory_3d_plot(runs_data, trajectory_plot_path, env_params=env_params)
+        except Exception as e:
+            print(f"Skipped plotting trajectories due to error: {e}")
 
         import numpy as np
         for env_state_batch, info_batch, label in runs_data:
@@ -579,56 +1085,143 @@ def main():
             while hasattr(state_batch, "env_state"):
                 state_batch = state_batch.env_state
             
-            model_state = state_batch.state
-            raw_positions = np.asarray(model_state.pos)
-            raw_attitudes = np.asarray(model_state.attitude)
+            model_state = getattr(state_batch, "state", state_batch)
+            raw_positions = np.asarray(model_state.pos) if hasattr(model_state, "pos") else None
+            raw_attitudes = np.asarray(model_state.attitude) if hasattr(model_state, "attitude") else None
             
             returned_episode = np.asarray(info_batch["returned_episode"])
             
-            if "terminal_pos" in info_batch:
-                terminal_positions = np.asarray(info_batch["terminal_pos"])
-                terminal_attitudes = np.asarray(info_batch["terminal_attitude"])
-            else:
-                terminal_positions = raw_positions
-                terminal_attitudes = raw_attitudes
+            returns = np.where(returned_episode, info_batch["returned_episode_returns"], np.nan)
+            valid_returns = returns[~np.isnan(returns)]
+            mean_return = np.nanmean(valid_returns) if len(valid_returns) > 0 else 0.0
+            std_return = np.nanstd(valid_returns) if len(valid_returns) > 0 else 0.0
+            print(f"Stats for {label} - Mean Return: {mean_return:.2f} +- {std_return:.2f}")
             
-            num_steps = raw_positions.shape[0]
-            num_envs = raw_positions.shape[1] if raw_positions.ndim > 2 else 1
-            
-            positions_list = []
-            attitudes_list = []
-            
-            for env_idx in range(num_envs):
-                env_returns = (
-                    returned_episode[:, env_idx]
-                    if returned_episode.ndim > 1
-                    else returned_episode
-                )
-                done_steps = np.where(env_returns)[0].tolist()
+            if "MPC_COSTS" in info_batch:
+                costs = np.asarray(info_batch["MPC_COSTS"])
+                print(f"Stats for {label} - Mean MPC Cost: {np.nanmean(costs):.4f}")
                 
-                if len(done_steps) > 0:
-                    first_done_idx = done_steps[0]
-                    env_pos = np.zeros((first_done_idx + 1, 3), dtype=raw_positions.dtype)
-                    env_pos[:first_done_idx] = raw_positions[:first_done_idx, env_idx]
-                    env_pos[first_done_idx] = terminal_positions[first_done_idx, env_idx]
-                    
-                    env_att = np.zeros((first_done_idx + 1, 4), dtype=raw_attitudes.dtype)
-                    env_att[:first_done_idx] = raw_attitudes[:first_done_idx, env_idx]
-                    env_att[first_done_idx] = terminal_attitudes[first_done_idx, env_idx]
+            if "collision" in info_batch:
+                collisions = np.asarray(info_batch["collision"])
+                num_done = np.sum(returned_episode)
+                if num_done > 0:
+                    collision_rate = np.sum(collisions) / num_done
+                    print(f"Stats for {label} - Collision Rate: {collision_rate:.2%}")
+
+            num_steps = raw_positions.shape[0] if raw_positions is not None else 0
+            num_envs = raw_positions.shape[1] if (raw_positions is not None and raw_positions.ndim > 2) else 1
+
+            if hasattr(state_batch, "target") and raw_positions is not None:
+                # Report statistics for non-colliding target error trajectories
+                clean_target_errors = []
+                collisions_arr = np.asarray(info_batch["collision"]) if "collision" in info_batch else None
+                term_positions = np.asarray(info_batch["terminal_pos"]) if "terminal_pos" in info_batch else raw_positions
+
+                for env_idx in range(num_envs):
+                    env_returns = (
+                        returned_episode[:, env_idx]
+                        if returned_episode.ndim > 1
+                        else returned_episode
+                    )
+                    done_steps = np.where(env_returns)[0].tolist()
+                    if len(done_steps) > 0:
+                        first_done_idx = min(done_steps[0], len(raw_positions) - 1)
+                        env_p = np.zeros((first_done_idx + 1, *raw_positions.shape[2:]), dtype=raw_positions.dtype)
+                        env_p[:first_done_idx] = raw_positions[:first_done_idx, env_idx]
+                        env_p[first_done_idx] = term_positions[first_done_idx, env_idx]
+                        has_collided = (
+                            bool(np.any(collisions_arr[: first_done_idx + 1, env_idx]))
+                            if collisions_arr is not None
+                            else False
+                        )
+                    else:
+                        first_done_idx = len(raw_positions) - 1
+                        env_p = raw_positions[:, env_idx]
+                        has_collided = (
+                            bool(np.any(collisions_arr[:, env_idx]))
+                            if collisions_arr is not None
+                            else False
+                        )
+
+                    if not has_collided:
+                        tgt_arr = np.asarray(state_batch.target)
+                        env_tgt = tgt_arr[0, env_idx] if tgt_arr.ndim == 4 else tgt_arr[env_idx]
+                        agent_errs = np.linalg.norm(env_p - env_tgt[None, :, :], axis=-1)
+                        clean_target_errors.append(agent_errs.mean(axis=-1))
+
+                if len(clean_target_errors) > 0:
+                    init_errs = [e[0] for e in clean_target_errors]
+                    final_errs = [e[-1] for e in clean_target_errors]
+                    mean_errs = [np.mean(e) for e in clean_target_errors]
+                    print(
+                        f"Stats for {label} - Non-colliding Episodes: "
+                        f"{len(clean_target_errors)}/{num_envs} "
+                        f"({len(clean_target_errors) / num_envs * 100:.1f}%)"
+                    )
+                    print(
+                        f"Stats for {label} - Non-colliding Target Error [m]: "
+                        f"Initial: {np.mean(init_errs):.3f} ± {np.std(init_errs):.3f} | "
+                        f"Final: {np.mean(final_errs):.3f} ± {np.std(final_errs):.3f} | "
+                        f"Trajectory Mean: {np.mean(mean_errs):.3f} ± {np.std(mean_errs):.3f}"
+                    )
                 else:
-                    env_pos = raw_positions[:, env_idx]
-                    env_att = raw_attitudes[:, env_idx]
-                
-                positions_list.append(env_pos)
-                attitudes_list.append(env_att)
+                    print(
+                        f"Stats for {label} - Non-colliding Episodes: 0/{num_envs} (100.0% collision rate)"
+                    )
             
-            trajectory_data = {
-                "position": positions_list,
-                "attitude": attitudes_list,
-            }
-            npy_path = plot_dir / f"{label}_trajectory.npy"
-            np.save(npy_path, trajectory_data)
-            print(f"Saved perturbed trajectory for '{label}' to {npy_path}")
+            try:
+                if "terminal_pos" in info_batch:
+                    terminal_positions = np.asarray(info_batch["terminal_pos"])
+                    terminal_attitudes = np.asarray(info_batch["terminal_attitude"]) if "terminal_attitude" in info_batch else None
+                else:
+                    terminal_positions = raw_positions
+                    terminal_attitudes = raw_attitudes
+                
+                num_steps = raw_positions.shape[0]
+                num_envs = raw_positions.shape[1] if raw_positions.ndim > 2 else 1
+                
+                positions_list = []
+                attitudes_list = []
+                
+                for env_idx in range(num_envs):
+                    env_returns = (
+                        returned_episode[:, env_idx]
+                        if returned_episode.ndim > 1
+                        else returned_episode
+                    )
+                    done_steps = np.where(env_returns)[0].tolist()
+                    
+                    if len(done_steps) > 0:
+                        first_done_idx = min(done_steps[0], len(raw_positions) - 1)
+                        env_pos = np.zeros((first_done_idx + 1, *raw_positions.shape[2:]), dtype=raw_positions.dtype)
+                        env_pos[:first_done_idx] = raw_positions[:first_done_idx, env_idx]
+                        env_pos[first_done_idx] = terminal_positions[first_done_idx, env_idx]
+                        
+                        if raw_attitudes is not None:
+                            env_att = np.zeros((first_done_idx + 1, *raw_attitudes.shape[2:]), dtype=raw_attitudes.dtype)
+                            env_att[:first_done_idx] = raw_attitudes[:first_done_idx, env_idx]
+                            env_att[first_done_idx] = terminal_attitudes[first_done_idx, env_idx]
+                        else:
+                            env_att = None
+                    else:
+                        env_pos = raw_positions[:, env_idx]
+                        env_att = raw_attitudes[:, env_idx] if raw_attitudes is not None else None
+                    
+                    positions_list.append(env_pos)
+                    if env_att is not None:
+                        attitudes_list.append(env_att)
+                
+                trajectory_data = {
+                    "position": positions_list,
+                }
+                if attitudes_list:
+                    trajectory_data["attitude"] = attitudes_list
+                    
+                npy_path = plot_dir / f"{label}_trajectory.npy"
+                np.save(npy_path, trajectory_data)
+                print(f"Saved perturbed trajectory for '{label}' to {npy_path}")
+            except Exception as e:
+                print(f"Skipping saving .npy trajectory for '{label}' due to error: {e}")
 
         print("Done.")
 

@@ -586,6 +586,58 @@ def init_networks(config, env, env_params, rng, load_params_fn=None):
     }
 
 
+def make_eval_step(config, graphdef, env, env_params, rngs_state=None, **kwargs):
+    """Create deterministic env-step function for DIFFMPC evaluation rollouts."""
+    if rngs_state is None:
+        rngs_state = {}
+
+    def get_physical_state(state):
+        def _get_base_state(s):
+            if hasattr(s, "pos"):
+                return s
+            if hasattr(s, "state") and hasattr(s.state, "pos"):
+                return s.state
+            if hasattr(s, "env_state"):
+                return _get_base_state(s.env_state)
+            return None
+
+        base = _get_base_state(state)
+        if base is None:
+            return None
+        if not hasattr(base, "attitude"):
+            return None
+        phys = jnp.concatenate([base.pos, base.attitude, base.vel, base.omega], axis=-1)
+        if hasattr(base, 'obstacle_pos'):
+            phys = jnp.concatenate([phys, base.obstacle_pos], axis=-1)
+        return phys
+
+    def _eval_step(eval_state: RunnerState, _unused):
+        rng, model_rng = jax.random.split(eval_state.rng)
+        model = nnx.merge(graphdef, eval_state.train_state.params, rngs_state)
+        
+        physical_state = get_physical_state(eval_state.env_state)
+        
+        pi, _ = model(eval_state.last_obs, physical_state=physical_state)
+        action = jnp.clip(pi.mode(), -1.0, 1.0)
+
+        rng, step_rng = jax.random.split(rng)
+        rng_step = jax.random.split(step_rng, config["NUM_ENVS"])
+        obsv, env_state, _reward, _done, info = env.step(
+            rng_step, eval_state.env_state, action, env_params
+        )
+
+        new_eval_state = RunnerState(
+            train_state=eval_state.train_state,
+            env_state=env_state,
+            last_obs=obsv,
+            rng=rng,
+            extras=eval_state.extras,
+        )
+        return new_eval_state, (info, env_state)
+
+    return _eval_step
+
+
 SPEC = AlgorithmSpec(
     algo_name="DIFFMPC_TRANSFORMER",
     wrap_env=wrap_env,
@@ -595,4 +647,5 @@ SPEC = AlgorithmSpec(
     calculate_gae=calculate_gae,
     extract_losses=extract_losses,
     init_networks=init_networks,
+    make_eval_step=make_eval_step,
 )

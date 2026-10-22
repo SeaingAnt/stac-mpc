@@ -412,3 +412,27 @@ class EvalVideoWrapper(GymnaxWrapper):
             dt = float(base_env.mj_model.opt.timestep) * float(base_env.default_params.frame_skip)
             return max(1, int(round(1.0 / dt)))
         return int(default_fps)
+
+    def render_ghost_and_trail(
+        self,
+        env_state_batch,
+        output_path=None,
+        num_ghosts=8,
+        width=800,
+        height=800,
+        dpi=150,
+        **kwargs,
+    ):
+        base_env = self._base_env()
+        if hasattr(base_env, "render_ghost_and_trail"):
+            return base_env.render_ghost_and_trail(
+                states=env_state_batch,
+                num_ghosts=num_ghosts,
+                output_path=output_path,
+                width=width,
+                height=height,
+                dpi=dpi,
+                **kwargs,
+            )
+        return None
+

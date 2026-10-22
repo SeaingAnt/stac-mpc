@@ -75,6 +75,9 @@ install-mpx = "python -c 'import mpx' || pip install --no-deps git+https://githu
 # Deletes all results
 clean = "rm -r ./runs/*"
 
+# Serve documentation website locally (with video streaming support)
+docs = "python docs/serve.py 8000"
+
 # Build wheel/sdist into dist/
 build = "python -m build"
 # Install in editable mode

@@ -59,6 +59,11 @@ class NavParams(environment.EnvParams):
     max_steps_in_episode: int = struct.field(pytree_node=False, default=100)
     lidar_bins: int = struct.field(pytree_node=False, default=10)
     lidar_range: float = struct.field(pytree_node=False, default=0.40)
+    state_noise_bound: float = struct.field(pytree_node=False, default=0.0)
+    is_testing: bool = struct.field(pytree_node=False, default=False)
+    scenario: str = struct.field(pytree_node=False, default="random")
+    custom_pos: Optional[Any] = struct.field(pytree_node=False, default=None)
+    custom_target: Optional[Any] = struct.field(pytree_node=False, default=None)
     # Action bounds (normalised)
     min_action: jax.Array = struct.field(
         pytree_node=False,
@@ -193,28 +198,51 @@ class MultiAgentNav2D(environment.Environment):
         lo = margin
         hi = params.arena_size - margin
 
-        # Sample positions ensuring no initial overlaps via rejection-free approach:
-        # Place agents on a larger grid and randomly choose subsets
-        grid_size = 4  # 16 possible spawn points
-        xs = jnp.linspace(lo, hi, grid_size)
-        ys = jnp.linspace(lo, hi, grid_size)
-        xx, yy = jnp.meshgrid(xs, ys)
-        all_grid_pos = jnp.stack([xx.flatten(), yy.flatten()], axis=-1)
-        
-        key, k1, k2, k3, k4 = jax.random.split(key, 5)
-        
-        pos_indices = jax.random.choice(k1, grid_size**2, shape=(n,), replace=False)
-        pos = all_grid_pos[pos_indices]
-        
-        target_indices = jax.random.choice(k2, grid_size**2, shape=(n,), replace=False)
-        target = all_grid_pos[target_indices]
-        
-        # Add noise to make it continuous and more randomized
-        noise_pos = jax.random.uniform(k3, (n, 2), minval=-0.2, maxval=0.2)
-        noise_target = jax.random.uniform(k4, (n, 2), minval=-0.2, maxval=0.2)
-        
-        pos = jnp.clip(pos + noise_pos, lo, hi)
-        target = jnp.clip(target + noise_target, lo, hi)
+        if params.custom_pos is not None and params.custom_target is not None:
+            pos = jnp.asarray(params.custom_pos, dtype=jnp.float32)
+            target = jnp.asarray(params.custom_target, dtype=jnp.float32)
+        elif params.scenario in ["cross", "corners"]:
+            pos_corner = jnp.array([
+                [lo, lo],
+                [hi, lo],
+                [hi, hi],
+                [lo, hi],
+            ], dtype=jnp.float32)
+            target_corner = jnp.array([
+                [hi, hi],
+                [lo, hi],
+                [lo, lo],
+                [hi, lo],
+            ], dtype=jnp.float32)
+            if n <= 4:
+                pos = pos_corner[:n]
+                target = target_corner[:n]
+            else:
+                pos = jnp.tile(pos_corner, ((n + 3) // 4, 1))[:n]
+                target = jnp.tile(target_corner, ((n + 3) // 4, 1))[:n]
+        else:
+            # Sample positions ensuring no initial overlaps via rejection-free approach:
+            # Place agents on a larger grid and randomly choose subsets
+            grid_size = 4  # 16 possible spawn points
+            xs = jnp.linspace(lo, hi, grid_size)
+            ys = jnp.linspace(lo, hi, grid_size)
+            xx, yy = jnp.meshgrid(xs, ys)
+            all_grid_pos = jnp.stack([xx.flatten(), yy.flatten()], axis=-1)
+            
+            key, k1, k2, k3, k4 = jax.random.split(key, 5)
+            
+            pos_indices = jax.random.choice(k1, grid_size**2, shape=(n,), replace=False)
+            pos = all_grid_pos[pos_indices]
+            
+            target_indices = jax.random.choice(k2, grid_size**2, shape=(n,), replace=False)
+            target = all_grid_pos[target_indices]
+            
+            # Add noise to make it continuous and more randomized
+            noise_pos = jax.random.uniform(k3, (n, 2), minval=-0.2, maxval=0.2)
+            noise_target = jax.random.uniform(k4, (n, 2), minval=-0.2, maxval=0.2)
+            
+            pos = jnp.clip(pos + noise_pos, lo, hi)
+            target = jnp.clip(target + noise_target, lo, hi)
 
         dist_to_target = jnp.linalg.norm(target - pos, axis=-1)
 
@@ -249,9 +277,21 @@ class MultiAgentNav2D(environment.Environment):
 
         # Single integrator: velocity = max_speed * action
         velocity = params.max_speed * act  # (N, 2)
+        
+        key, key_noise = jax.random.split(key, 2)
+        noise_state = jax.lax.select(
+            params.is_testing,
+            jax.random.uniform(
+                key_noise,
+                shape=(n, 2),
+                minval=-params.state_noise_bound,
+                maxval=params.state_noise_bound,
+            ),
+            jnp.zeros((n, 2)),
+        )
 
         # Euler integration
-        new_pos = state.pos + params.dt * velocity
+        new_pos = state.pos + params.dt * (velocity + noise_state)
 
         # Clamp to arena boundaries
         new_pos = jnp.clip(new_pos, params.robot_radius, params.arena_size - params.robot_radius)
@@ -350,11 +390,91 @@ class MultiAgentNav2D(environment.Environment):
             ),
         })
 
+    def _draw_lidar_rays(
+        self,
+        ax: Any,
+        pos: np.ndarray,
+        colors: Any,
+        alpha_scale: float = 1.0,
+        zorder: int = 2,
+    ):
+        """Draw lidar rays and hit detections for all agents given their positions."""
+        params = self.default_params
+        angles = np.linspace(0, 2 * np.pi, params.lidar_bins, endpoint=False)
+        dirs = np.stack([np.cos(angles), np.sin(angles)], axis=-1)
+
+        for i in range(self.num_agents):
+            c = colors[i % len(colors)]
+            for k in range(params.lidar_bins):
+                min_t = params.lidar_range
+                d = dirs[k]
+                hit = False
+                for j in range(self.num_agents):
+                    if i == j:
+                        continue
+                    v = pos[i] - pos[j]
+                    v_dot_d = np.dot(v, d)
+                    v_sq = np.dot(v, v)
+                    r_sq = params.robot_radius**2
+                    delta = v_dot_d**2 - (v_sq - r_sq)
+                    if delta >= 0:
+                        t1 = -v_dot_d - np.sqrt(delta)
+                        t2 = -v_dot_d + np.sqrt(delta)
+                        t = t1 if t1 > 0 else t2
+                        if t > 0 and t < min_t:
+                            min_t = t
+                            hit = True
+
+                ray_end = pos[i] + d * min_t
+                ray_alpha = max(0.12, min(0.65, 0.45 * alpha_scale))
+                ax.plot(
+                    [pos[i, 0], ray_end[0]],
+                    [pos[i, 1], ray_end[1]],
+                    color=c,
+                    alpha=ray_alpha,
+                    linewidth=0.9 if alpha_scale < 1.0 else 1.2,
+                    zorder=zorder,
+                )
+                if hit:
+                    # Red highlight on detected other agents within lidar range
+                    ax.scatter(
+                        ray_end[0],
+                        ray_end[1],
+                        color="red",
+                        s=14 if alpha_scale >= 1.0 else 9,
+                        alpha=min(1.0, 0.7 * alpha_scale + 0.3),
+                        zorder=zorder + 1,
+                    )
+                else:
+                    ax.scatter(
+                        ray_end[0],
+                        ray_end[1],
+                        color=c,
+                        s=4 if alpha_scale >= 1.0 else 2,
+                        alpha=ray_alpha * 0.7,
+                        zorder=zorder,
+                    )
+
     def render_frame_from_state(
         self,
         env_state: NavState | environment.EnvState,
         trail: list[np.ndarray],
         ax: Any,
+        ghost_positions: Optional[List[np.ndarray] | np.ndarray] = None,
+        ghost_alphas: Optional[List[float] | np.ndarray] = None,
+        show_lidar: bool = True,
+        show_ghost_lidar: Optional[bool] = None,
+        show_trail: bool = True,
+        show_start: bool = False,
+        show_agent_ids: bool = False,
+        show_goal_radius: bool = False,
+        show_axis: bool = False,
+        show_arena_bounds: bool = True,
+        final_alpha: float = 0.6,
+        trail_linestyle: str = '--',
+        trail_linewidth: float = 1.0,
+        trail_alpha: float = 0.5,
+        title: Optional[str] = None,
     ) -> np.ndarray:
         import matplotlib.pyplot as plt
         import matplotlib.patches as patches
@@ -370,56 +490,325 @@ class MultiAgentNav2D(environment.Environment):
         params = self.default_params
         ax.set_xlim([0.0, params.arena_size])
         ax.set_ylim([0.0, params.arena_size])
-        ax.set_xlabel('X [m]')
-        ax.set_ylabel('Y [m]')
         ax.set_aspect('equal')
+        if title:
+            ax.set_title(title, fontsize=14, fontweight='bold', pad=12)
+
+        if show_axis:
+            ax.set_xlabel('X [m]')
+            ax.set_ylabel('Y [m]')
+            ax.grid(True, linestyle=':', alpha=0.3)
+        else:
+            ax.axis('off')
+            if show_arena_bounds:
+                arena_rect = patches.Rectangle(
+                    (0.0, 0.0),
+                    params.arena_size,
+                    params.arena_size,
+                    fill=False,
+                    edgecolor='#bbbbbb',
+                    linestyle='--',
+                    linewidth=1.2,
+                    zorder=1,
+                )
+                ax.add_patch(arena_rect)
         
-        colors = plt.cm.get_cmap('tab10')(np.linspace(0, 1, self.num_agents))
-        
+        cmap = plt.get_cmap('tab10')
+        colors = [cmap(i % 10) for i in range(self.num_agents)]
+
+        if show_ghost_lidar is None:
+            show_ghost_lidar = show_lidar
+
+        # Draw ghost motion (stroboscopic robot poses along trajectory)
+        if ghost_positions is not None:
+            ghost_arr = np.asarray(ghost_positions)  # (G, num_agents, 2)
+            num_ghost_steps = len(ghost_arr)
+            if ghost_alphas is None:
+                alphas = np.linspace(0.12, 0.50, num_ghost_steps)
+            else:
+                alphas = ghost_alphas
+
+            for g_idx in range(num_ghost_steps):
+                alpha_g = float(alphas[g_idx])
+                for i in range(self.num_agents):
+                    c = colors[i % len(colors)]
+                    gx, gy = ghost_arr[g_idx, i, 0], ghost_arr[g_idx, i, 1]
+                    ghost_circle = patches.Circle(
+                        (gx, gy),
+                        params.robot_radius,
+                        edgecolor=c,
+                        facecolor=c,
+                        alpha=alpha_g,
+                        linewidth=1.2,
+                        linestyle='-',
+                        zorder=2,
+                    )
+                    ax.add_patch(ghost_circle)
+
+                # Draw lidar rays for each ghost snapshot showing local observation evolution
+                if show_ghost_lidar:
+                    self._draw_lidar_rays(
+                        ax=ax,
+                        pos=ghost_arr[g_idx],
+                        colors=colors,
+                        alpha_scale=alpha_g,
+                        zorder=2,
+                    )
+
+        trail_arr = np.array(trail) if len(trail) > 0 else None
+
         for i in range(self.num_agents):
             c = colors[i % len(colors)]
-            
-            # Draw robot
-            circle = patches.Circle((pos[i, 0], pos[i, 1]), params.robot_radius, edgecolor=c, facecolor=c, alpha=0.6)
-            ax.add_patch(circle)
-            
-            # Draw target
-            ax.scatter(target[i, 0], target[i, 1], color=c, marker='x', s=100, label=f'Target {i}')
-            
-            # Draw lidar
-            angles = np.linspace(0, 2 * np.pi, params.lidar_bins, endpoint=False)
-            dirs = np.stack([np.cos(angles), np.sin(angles)], axis=-1)
-            
-            for k in range(params.lidar_bins):
-                min_t = params.lidar_range
-                d = dirs[k]
-                for j in range(self.num_agents):
-                    if i == j: continue
-                    v = pos[i] - pos[j]
-                    v_dot_d = np.dot(v, d)
-                    v_sq = np.dot(v, v)
-                    r_sq = params.robot_radius**2
-                    delta = v_dot_d**2 - (v_sq - r_sq)
-                    if delta >= 0:
-                        t1 = -v_dot_d - np.sqrt(delta)
-                        t2 = -v_dot_d + np.sqrt(delta)
-                        t = t1 if t1 > 0 else t2
-                        if t > 0 and t < min_t:
-                            min_t = t
-                
-                ray_end = pos[i] + d * min_t
-                ax.plot([pos[i, 0], ray_end[0]], [pos[i, 1], ray_end[1]], color=c, alpha=0.3, linewidth=1)
-                ax.scatter(ray_end[0], ray_end[1], color='red', s=5, alpha=0.5)
+
+            # Draw start position marker
+            if show_start and trail_arr is not None:
+                ax.scatter(
+                    trail_arr[0, i, 0],
+                    trail_arr[0, i, 1],
+                    marker='o',
+                    s=40,
+                    facecolors='white',
+                    edgecolors=c,
+                    linewidths=1.5,
+                    zorder=4,
+                )
 
             # Draw trail
-            if len(trail) > 0:
-                trail_arr = np.array(trail) # (T, N, 2)
-                ax.plot(trail_arr[:, i, 0], trail_arr[:, i, 1], color=c, alpha=0.5, linestyle='--')
+            if show_trail and trail_arr is not None:
+                ax.plot(
+                    trail_arr[:, i, 0],
+                    trail_arr[:, i, 1],
+                    color=c,
+                    alpha=trail_alpha,
+                    linestyle=trail_linestyle,
+                    linewidth=trail_linewidth,
+                    zorder=3,
+                )
+            
+            # Draw robot
+            circle = patches.Circle(
+                (pos[i, 0], pos[i, 1]),
+                params.robot_radius,
+                edgecolor='black' if final_alpha > 0.8 else c,
+                facecolor=c,
+                alpha=final_alpha,
+                linewidth=1.5 if final_alpha > 0.8 else 1.0,
+                zorder=5,
+            )
+            ax.add_patch(circle)
+
+            # Agent ID label
+            if show_agent_ids:
+                ax.text(
+                    pos[i, 0],
+                    pos[i, 1],
+                    f"{i}",
+                    color='white',
+                    ha='center',
+                    va='center',
+                    fontsize=9,
+                    fontweight='bold',
+                    zorder=6,
+                )
+            
+            # Draw target
+            ax.scatter(
+                target[i, 0],
+                target[i, 1],
+                color=c,
+                marker='x',
+                s=120,
+                linewidth=2.5,
+                zorder=5,
+                label=f'Target {i}',
+            )
+
+            # Target goal radius
+            if show_goal_radius:
+                target_circle = patches.Circle(
+                    (target[i, 0], target[i, 1]),
+                    params.goal_radius,
+                    edgecolor=c,
+                    facecolor='none',
+                    linestyle='--',
+                    alpha=0.5,
+                    linewidth=1.2,
+                    zorder=2,
+                )
+                ax.add_patch(target_circle)
+            
+        # Draw final state lidar rays
+        if show_lidar:
+            self._draw_lidar_rays(
+                ax=ax,
+                pos=pos,
+                colors=colors,
+                alpha_scale=1.0,
+                zorder=4,
+            )
             
         # Convert figure to array
         fig = ax.figure
         fig.canvas.draw()
         img = np.asarray(fig.canvas.buffer_rgba())[..., :3].copy()
+        return img
+
+    def render_ghost_and_trail(
+        self,
+        states: Union[List[NavState | environment.EnvState], Any, np.ndarray],
+        num_ghosts: int = 8,
+        step_every: Optional[int] = None,
+        output_path: Optional[Union[Path, str]] = None,
+        width: int = 800,
+        height: int = 800,
+        dpi: int = 150,
+        show_lidar: bool = True,
+        show_ghost_lidar: Optional[bool] = None,
+        show_start: bool = True,
+        show_agent_ids: bool = True,
+        show_goal_radius: bool = True,
+        show_axis: bool = False,
+        show_arena_bounds: bool = True,
+        ghost_alpha_min: float = 0.12,
+        ghost_alpha_max: float = 0.55,
+        final_alpha: float = 0.95,
+        trail_linestyle: str = "-",
+        trail_linewidth: float = 2.0,
+        trail_alpha: float = 0.7,
+        title: Optional[str] = "Multi-Agent Navigation - Ghost & Trail Motion",
+        ax: Any = None,
+    ) -> np.ndarray:
+        """Render a single high-quality composite image depicting multi-agent motion.
+
+        Features:
+          - Continuous motion trails showing full agent trajectory
+          - Ghost robot silhouettes (circles with robot_radius) at intermediate timestamps
+          - Distinct initial poses and solid final robot poses
+          - Physical target points and goal acceptance radii
+        """
+        import matplotlib.pyplot as plt
+
+        # 1. Parse trajectory positions and targets
+        pos_arr = None
+        target_arr = None
+
+        if isinstance(states, (np.ndarray, jnp.ndarray)):
+            pos_arr = np.asarray(states)
+            if pos_arr.ndim == 4:
+                pos_arr = pos_arr[:, 0]
+        elif isinstance(states, list):
+            trail_list = []
+            for s in states:
+                s_obj = s
+                while hasattr(s_obj, "env_state"):
+                    s_obj = s_obj.env_state
+                if hasattr(s_obj, "state"):
+                    s_obj = s_obj.state
+                pos = np.asarray(jax.device_get(s_obj.pos))
+                if pos.ndim > 2:
+                    pos = pos[0]
+                trail_list.append(pos)
+                if target_arr is None and hasattr(s_obj, "target") and s_obj.target is not None:
+                    t = np.asarray(jax.device_get(s_obj.target))
+                    if t.ndim > 2:
+                        t = t[0]
+                    target_arr = t
+            pos_arr = np.array(trail_list)
+        else:
+            # PyTree / batch state
+            s = states
+            while hasattr(s, "env_state"):
+                s = s.env_state
+            model_s = getattr(s, "state", s)
+            if hasattr(model_s, "pos"):
+                pos_arr = np.asarray(jax.device_get(model_s.pos))
+                if pos_arr.ndim == 4:
+                    pos_arr = pos_arr[:, 0]
+            if hasattr(s, "target"):
+                t = np.asarray(jax.device_get(s.target))
+                if t.ndim == 4:
+                    target_arr = t[-1, 0]
+                elif t.ndim == 3:
+                    target_arr = t[-1]
+                else:
+                    target_arr = t
+            elif hasattr(model_s, "target"):
+                t = np.asarray(jax.device_get(model_s.target))
+                if t.ndim == 4:
+                    target_arr = t[-1, 0]
+                elif t.ndim == 3:
+                    target_arr = t[-1]
+                else:
+                    target_arr = t
+
+        if pos_arr is None or len(pos_arr) == 0:
+            raise ValueError("No valid position trajectory found in states.")
+
+        if target_arr is None:
+            # Default target to center if unavailable
+            target_arr = np.full((self.num_agents, 2), self.default_params.arena_size / 2.0)
+
+        t_steps = len(pos_arr)
+        if step_every is not None and step_every > 0:
+            ghost_indices = [idx for idx in range(0, t_steps - 1, step_every)]
+        else:
+            num_g = max(1, min(num_ghosts, t_steps - 1))
+            ghost_indices = np.linspace(0, t_steps - 1, num_g, endpoint=False, dtype=int).tolist()
+            ghost_indices = sorted(list(dict.fromkeys(ghost_indices)))
+
+        ghost_positions = pos_arr[ghost_indices] if len(ghost_indices) > 0 else None
+        ghost_alphas = (
+            np.linspace(ghost_alpha_min, ghost_alpha_max, len(ghost_indices))
+            if ghost_positions is not None
+            else None
+        )
+
+        trail = [pos_arr[t] for t in range(t_steps)]
+        last_state = NavState(
+            pos=jnp.asarray(pos_arr[-1]),
+            target=jnp.asarray(target_arr),
+            prev_dist=jnp.zeros((self.num_agents,)),
+            global_state=jnp.zeros((1,)),
+            time=t_steps,
+            history=jnp.zeros((self.num_agents, 1, 1)),
+        )
+
+        close_fig = False
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(width / dpi, height / dpi), dpi=dpi)
+            close_fig = True
+        else:
+            fig = ax.figure
+
+        img = self.render_frame_from_state(
+            env_state=last_state,
+            trail=trail,
+            ax=ax,
+            ghost_positions=ghost_positions,
+            ghost_alphas=ghost_alphas,
+            show_lidar=show_lidar,
+            show_ghost_lidar=show_ghost_lidar,
+            show_trail=True,
+            show_start=show_start,
+            show_agent_ids=show_agent_ids,
+            show_goal_radius=show_goal_radius,
+            show_axis=show_axis,
+            show_arena_bounds=show_arena_bounds,
+            final_alpha=final_alpha,
+            trail_linestyle=trail_linestyle,
+            trail_linewidth=trail_linewidth,
+            trail_alpha=trail_alpha,
+            title=title,
+        )
+
+        if output_path is not None:
+            out_p = Path(output_path)
+            out_p.parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(str(out_p), dpi=dpi, bbox_inches="tight")
+
+        if close_fig:
+            plt.close(fig)
+
         return img
 
     def render_video_from_states(

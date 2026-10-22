@@ -392,8 +392,8 @@ class DroneV2(environment.Environment):
             jax.random.uniform(
                 key_noise,
                 shape=(6,),
-                minval=-1.0,
-                maxval=1.0,
+                minval=-0.0,
+                maxval=0.0,
             ),
             jnp.zeros(6),
         )

@@ -9,7 +9,7 @@
         content="Stable Transformer-Actor-Critic Model Predictive Control: A Contraction Analysis Approach.">
     <!-- Google Fonts: Inter for a clean, modern look -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="style.css?v=20261022_drone">
 
     <!-- MathJax for LaTeX rendering -->
     <script>
@@ -20,6 +20,32 @@
         };
     </script>
     <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+
+    <!-- Failsafe bridge: guarantees buttons and sliders work instantly regardless of network/cache state -->
+    <script>
+        function setScenarioParam(scenario, param, val) {
+            var numericVal = parseInt(val, 10);
+            var sliderId = (scenario === 1 ? 's1' : 's2') + (param === 'noise' ? 'NoiseSlider' : 'DistSlider');
+            var ticksId = (scenario === 1 ? 's1' : 's2') + (param === 'noise' ? 'NoiseTicks' : 'DistTicks');
+            var slider = document.getElementById(sliderId);
+            if (slider) slider.value = numericVal;
+            var container = document.getElementById(ticksId);
+            if (container) {
+                var ticks = container.querySelectorAll('.tick');
+                for (var i = 0; i < ticks.length; i++) {
+                    if (parseInt(ticks[i].getAttribute('data-val'), 10) === numericVal) {
+                        ticks[i].classList.add('active');
+                        ticks[i].setAttribute('aria-pressed', 'true');
+                    } else {
+                        ticks[i].classList.remove('active');
+                        ticks[i].setAttribute('aria-pressed', 'false');
+                    }
+                }
+            }
+            if (scenario === 1 && typeof window.updateScenario1 === 'function') window.updateScenario1(false);
+            if (scenario === 2 && typeof window.updateScenario2 === 'function') window.updateScenario2(false);
+        }
+    </script>
 </head>
 
 <body>
@@ -61,18 +87,92 @@
             </div>
         </section>
 
-        <!-- Visual Demo Section -->
+        <!-- Visual Demo Section with Unified Drone Video & Sliders -->
         <section class="visual-demo" id="demo">
-            <div class="video-description" style="margin-bottom: 20px;">
-                <p style="font-size: 1.1rem; color: var(--heading-color);">
-                    <strong>Demo:</strong> The video below shows a drone navigating while avoiding obstacles under
-                    severe system disturbance and input noise.
+            <div class="demo-header">
+                <div class="cartoon-pill">🎮 Interactive Benchmark Explorer</div>
+                <h2 class="section-title">Drone Obstacle Avoidance Under Noise &amp; Disturbances</h2>
+                <p class="demo-subtitle">
+                    Select observation noise and external disturbance levels to compare the
+                    <strong>Unstable (Baseline)</strong> and <strong>Stable (STAC-MPC)</strong> trajectories side by
+                    side.
                 </p>
             </div>
-            <div class="demo-container">
-                <video autoplay loop muted playsinline class="demo-media">
-                    <source src="assets/obstacle.mp4" type="video/mp4">
-                </video>
+
+            <!-- Single Unified Interactive Card with Connected Sliders and Video -->
+            <div class="unified-comparator-card" id="comparatorCard">
+                <!-- Top Header -->
+                <div class="comparator-col-headers">
+                    <div class="col-header-item header-scenario-1">
+                        <div class="badge-tag tag-scenario1">🛸 Single-Agent Drone</div>
+                        <h3 class="col-title">Single-Agent Drone Obstacle Avoidance</h3>
+                        <span class="metric-indicator" id="s1Status">
+                            STAC-MPC contracts error while unregularized baseline oscillates.
+                        </span>
+                    </div>
+                </div>
+
+                <!-- Connected Video Frame Row -->
+                <div class="comparator-videos-grid">
+                    <div class="scenario-video-pane">
+                        <div class="box-video-frame">
+                            <video id="videoCol1" autoplay loop muted playsinline class="scenario-video" preload="auto">
+                                <source id="sourceCol1" src="assets/obstacle0.25-0.2.mp4" type="video/mp4">
+                                Your browser does not support HTML5 video.
+                            </video>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Combined Horizontal Control Block: Observation Noise & External Disturbance -->
+                <div class="combined-control-row">
+                    <div class="control-row-inputs">
+                        <!-- Drone Observation Noise -->
+                        <div class="scenario-slider-cell">
+                            <div class="cell-top-meta">
+                                <span class="cell-sublabel">Observation Noise</span>
+                                <span class="inline-val-badge badge-noise" id="s1NoiseBadge">Moderate ($\sigma = 0.25$)</span>
+                            </div>
+                            <input type="range" min="0" max="2" value="1" step="1" id="s1NoiseSlider"
+                                class="range-slider" aria-label="Single-Agent Drone Observation Noise">
+                            <div class="compact-ticks" id="s1NoiseTicks">
+                                <button type="button" class="tick" data-val="0" onclick="setScenarioParam(1, 'noise', 0)">None<br><small>$\sigma = 0.0$</small></button>
+                                <button type="button" class="tick active" data-val="1" onclick="setScenarioParam(1, 'noise', 1)">Moderate<br><small>$\sigma = 0.25$</small></button>
+                                <button type="button" class="tick" data-val="2" onclick="setScenarioParam(1, 'noise', 2)">Severe<br><small>$\sigma = 0.50$</small></button>
+                            </div>
+                        </div>
+
+                        <!-- Drone External Disturbance -->
+                        <div class="scenario-slider-cell">
+                            <div class="cell-top-meta">
+                                <span class="cell-sublabel">External Disturbance</span>
+                                <span class="inline-val-badge badge-dist" id="s1DistBadge">Moderate ($d = 0.2\,\text{N}$)</span>
+                            </div>
+                            <input type="range" min="0" max="2" value="1" step="1" id="s1DistSlider"
+                                class="range-slider" aria-label="Single-Agent Drone External Disturbance">
+                            <div class="compact-ticks" id="s1DistTicks">
+                                <button type="button" class="tick" data-val="0" onclick="setScenarioParam(1, 'dist', 0)">None<br><small>$d = 0.0\,\text{N}$</small></button>
+                                <button type="button" class="tick active" data-val="1" onclick="setScenarioParam(1, 'dist', 1)">Moderate<br><small>$d = 0.2\,\text{N}$</small></button>
+                                <button type="button" class="tick" data-val="2" onclick="setScenarioParam(1, 'dist', 2)">Severe<br><small>$d = 0.4\,\text{N}$</small></button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- Scenario Narrative & Analysis -->
+            <div class="scenario-analysis-box">
+                <div class="analysis-icon">🎯</div>
+                <div class="analysis-content">
+                    <h4 class="analysis-title" id="scenarioAnalysisTitle">Contraction &amp; Robustness Insights</h4>
+                    <p id="scenarioAnalysisText">
+                        Adjusting the disturbance and observation noise levels demonstrates the effectiveness of the $\delta\text{ISS}$
+                        contraction regularizer. While the unconstrained Transformer baseline suffers from high-frequency chattering,
+                        trajectory drift, and severe oscillations near obstacles, STAC-MPC certifies exponential error decay
+                        to maintain safe clearance.
+                    </p>
+                </div>
             </div>
         </section>
 
@@ -114,22 +214,21 @@
             </ul>
 
             <div class="demo-container">
-                <!-- TODO: Replace the placeholder below with your PNG image tag -->
                 <img src="assets/scheme.png" alt="System Schematics" class="demo-media">
             </div>
         </section>
 
-        <!-- Citation Section 
+        <!-- Citation Section -->
         <section class="citation" id="citation">
             <h2 class="section-title">Citation</h2>
             <p>If you find this work useful, please consider citing it:</p>
             <div class="bibtex-container">
                 <button class="copy-btn" id="copyBibtex">Copy</button>
-                <pre><code id="bibtexCode">@article{author202Xstable,
-  title={[Paper Title Placeholder] Stable Transformer-Actor-Critic Model Predictive Control},
-  author={Author, First and Author, Second and Author, Third},
-  journal={arXiv preprint arXiv:XXXX.XXXXX},
-  year={202X}
+                <pre><code id="bibtexCode">@article{marino2026stable,
+  title={Stable Transformer-Actor-Critic Model Predictive Control: A Contraction Analysis Approach},
+  author={Marino, Antonio and Modugno, Valerio and Cognetti, Marco},
+  journal={arXiv preprint arXiv:2606.20197},
+  year={2026}
 }</code></pre>
             </div>
         </section>
@@ -137,12 +236,11 @@
 
     <footer>
         <div class="container">
-            <p>&copy; 202X [Author Names]. Licensed under MIT.</p>
+            <p>&copy; 2026 STAC-MPC, Marino Modugno Cognetti. Licensed under MIT.</p>
         </div>
     </footer>
 
-    <script src="script.js"></script>
+    <script src="script.js?v=20261022_drone"></script>
 </body>
--->
 
 </html>

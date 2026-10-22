@@ -637,7 +637,7 @@ class TransformerActorCritic(nnx.Module):
         x = self.input_projection(x)  # (batch_size, seq_len, transformer_hidden_dim)
         x = nnx.tanh(x)
         # Add spatial encoding
-        x = self.spatial_encoding(x)
+        #x = self.spatial_encoding(x)
 
         # Apply transformer encoder blocks
         for encoder_block in self.encoder_blocks:
