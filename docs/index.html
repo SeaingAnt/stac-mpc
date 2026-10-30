@@ -9,7 +9,7 @@
         content="Stable Transformer-Actor-Critic Model Predictive Control: A Contraction Analysis Approach.">
     <!-- Google Fonts: Inter for a clean, modern look -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css?v=20261022_drone">
+    <link rel="stylesheet" href="style.css?v=20261030_white">
 
     <!-- MathJax for LaTeX rendering -->
     <script>
@@ -87,31 +87,20 @@
             </div>
         </section>
 
-        <!-- Visual Demo Section with Unified Drone Video & Sliders -->
+        <!-- Visual Demo Section with Drone Video & Sliders -->
         <section class="visual-demo" id="demo">
             <div class="demo-header">
-                <div class="cartoon-pill">🎮 Interactive Benchmark Explorer</div>
-                <h2 class="section-title">Drone Obstacle Avoidance Under Noise &amp; Disturbances</h2>
+                <h2 class="section-title">Single-Agent Drone Obstacle Avoidance Under Noise &amp; Disturbances</h2>
                 <p class="demo-subtitle">
                     Select observation noise and external disturbance levels to compare the
                     <strong>Unstable (Baseline)</strong> and <strong>Stable (STAC-MPC)</strong> trajectories side by
-                    side.
+                    side. While the unregularized baseline oscillates and drifts under perturbations, STAC-MPC contracts
+                    tracking error to guarantee safe obstacle clearance.
                 </p>
             </div>
 
             <!-- Single Unified Interactive Card with Connected Sliders and Video -->
             <div class="unified-comparator-card" id="comparatorCard">
-                <!-- Top Header -->
-                <div class="comparator-col-headers">
-                    <div class="col-header-item header-scenario-1">
-                        <div class="badge-tag tag-scenario1">🛸 Single-Agent Drone</div>
-                        <h3 class="col-title">Single-Agent Drone Obstacle Avoidance</h3>
-                        <span class="metric-indicator" id="s1Status">
-                            STAC-MPC contracts error while unregularized baseline oscillates.
-                        </span>
-                    </div>
-                </div>
-
                 <!-- Connected Video Frame Row -->
                 <div class="comparator-videos-grid">
                     <div class="scenario-video-pane">
@@ -240,7 +229,7 @@
         </div>
     </footer>
 
-    <script src="script.js?v=20261022_drone"></script>
+    <script src="script.js?v=20261030_white"></script>
 </body>
 
 </html>

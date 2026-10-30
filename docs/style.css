@@ -288,8 +288,8 @@ section {
 
 /* Combined Horizontal Blocks (Observation Noise & External Disturbance) */
 .combined-control-row {
-    border-bottom: 2px solid #e2e8f0;
-    background: #f8fafc;
+    border-top: 2px solid #e2e8f0;
+    background: #ffffff;
     display: flex;
     flex-direction: column;
 }
@@ -539,7 +539,7 @@ section {
 
 .box-video-frame {
     position: relative;
-    background: #0f172a;
+    background: #ffffff;
     width: 100%;
     aspect-ratio: 16/9;
     overflow: hidden;
@@ -726,12 +726,12 @@ section {
 /* Citation Section */
 .bibtex-container {
     position: relative;
-    background: #1e293b;
-    /* Slate 800 */
+    background: #ffffff;
+    border: 2px solid #cbd5e1;
     border-radius: var(--radius);
     padding: 24px;
     margin-top: 20px;
-    box-shadow: var(--shadow-md);
+    box-shadow: 0 4px 0 #cbd5e1;
 }
 
 .bibtex-container pre {
@@ -740,8 +740,8 @@ section {
 
 .bibtex-container code {
     font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
-    color: #e2e8f0;
-    /* Slate 200 */
+    color: #1e293b;
+    /* Slate 800 */
     font-size: 0.95rem;
     line-height: 1.5;
 }
@@ -750,19 +750,28 @@ section {
     position: absolute;
     top: 16px;
     right: 16px;
-    background: rgba(255, 255, 255, 0.1);
-    border: 1px solid rgba(255, 255, 255, 0.2);
-    color: var(--white);
-    padding: 6px 12px;
-    border-radius: 6px;
+    background: #f8fafc;
+    border: 2px solid #cbd5e1;
+    color: #334155;
+    padding: 6px 14px;
+    border-radius: 8px;
     cursor: pointer;
     font-size: 0.85rem;
-    font-weight: 500;
-    transition: background 0.2s;
+    font-weight: 700;
+    box-shadow: 0 2px 0 #cbd5e1;
+    transition: all 0.15s ease;
 }
 
 .copy-btn:hover {
-    background: rgba(255, 255, 255, 0.2);
+    background: #f1f5f9;
+    border-color: #94a3b8;
+    transform: translateY(-1px);
+    box-shadow: 0 3px 0 #94a3b8;
+}
+
+.copy-btn:active {
+    transform: translateY(2px);
+    box-shadow: 0 1px 0 #94a3b8;
 }
 
 /* Footer */

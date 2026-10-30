@@ -133,12 +133,14 @@ function initBenchmarkExplorer() {
                 await navigator.clipboard.writeText(bibtexCode.innerText);
                 const originalText = copyBtn.innerText;
                 copyBtn.innerText = "Copied!";
-                copyBtn.style.background = "rgba(16, 185, 129, 0.2)";
-                copyBtn.style.borderColor = "rgba(16, 185, 129, 0.5)";
+                copyBtn.style.background = "#dcfce7";
+                copyBtn.style.borderColor = "#86efac";
+                copyBtn.style.color = "#166534";
                 setTimeout(function () {
                     copyBtn.innerText = originalText;
-                    copyBtn.style.background = "rgba(255, 255, 255, 0.1)";
-                    copyBtn.style.borderColor = "rgba(255, 255, 255, 0.2)";
+                    copyBtn.style.background = "";
+                    copyBtn.style.borderColor = "";
+                    copyBtn.style.color = "";
                 }, 2000);
             } catch (err) {
                 copyBtn.innerText = "Failed";
