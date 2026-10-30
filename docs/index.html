@@ -9,7 +9,7 @@
         content="Stable Transformer-Actor-Critic Model Predictive Control: A Contraction Analysis Approach.">
     <!-- Google Fonts: Inter for a clean, modern look -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css?v=20261030_white">
+    <link rel="stylesheet" href="style.css?v=20261030_banner">
 
     <!-- MathJax for LaTeX rendering -->
     <script>
@@ -105,6 +105,18 @@
                 <div class="comparator-videos-grid">
                     <div class="scenario-video-pane">
                         <div class="box-video-frame">
+                            <!-- Video Legend Banner -->
+                            <div class="video-legend-banner" aria-label="Trajectory legend">
+                                <span class="legend-item">
+                                    <span class="legend-dot dot-stable"></span>
+                                    <span>Stable</span>
+                                </span>
+                                <span class="legend-divider"></span>
+                                <span class="legend-item">
+                                    <span class="legend-dot dot-unstable"></span>
+                                    <span>Unstable</span>
+                                </span>
+                            </div>
                             <video id="videoCol1" autoplay loop muted playsinline class="scenario-video" preload="auto">
                                 <source id="sourceCol1" src="assets/obstacle0.25-0.2.mp4" type="video/mp4">
                                 Your browser does not support HTML5 video.
@@ -229,7 +241,7 @@
         </div>
     </footer>
 
-    <script src="script.js?v=20261030_white"></script>
+    <script src="script.js?v=20261030_banner"></script>
 </body>
 
 </html>
