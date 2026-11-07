@@ -37,7 +37,10 @@ def gae_standard(config, traj_batch, last_val):
             + config["GAMMA"] * value_to_bootstrap * discount_mult
             - transition.value
         )
-        gae = delta + config["GAMMA"] * config["GAE_LAMBDA"] * discount_mult * gae
+        # On episode boundaries (done=True), gae from the next episode should not propagate backward,
+        # even if discount_mult > 0 (truncation bootstrap applies only to value_to_bootstrap in delta).
+        non_terminal = 1.0 - transition.done
+        gae = delta + config["GAMMA"] * config["GAE_LAMBDA"] * non_terminal * gae
         return (gae, transition.value), gae
 
     _, advantages = jax.lax.scan(

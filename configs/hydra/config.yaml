@@ -7,7 +7,7 @@ hydra:
   output_subdir: null  # Disables .hydra folder creation     
   
 defaults:
-  - method: diffmpc_transformer_stab
+  - method: diffmpc_transformer
   - env: drone_v1
   - override hydra/job_logging: none  # Correct way to disable job logging
   - override hydra/hydra_logging: none  # Correct way to disable hydra logging

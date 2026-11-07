@@ -493,15 +493,16 @@ class TransformerEncoderBlock(nnx.Module):
             (batch_size, seq_len, feature_dim)
         """
         # Multi-head attention with residual connection
-        x = self.mha_ln(x)
+        
         attn_out = self.mha(x, mask=mask, deterministic=not training)
         x = 0.5 * x + attn_out
         # x = x - jnp.mean(x, axis=-1, keepdims=True)/(jnp.std(x, axis=-1, keepdims=True) + 1e-8) # LayerNorm without learnable parameters
-
+        x = self.mha_ln(x)
+        
         # Feed-forward with residual connection
         activation = nnx.relu if self.activation_name == "relu" else nnx.tanh
         ffn_out = activation(self.ffn_dense1(x))
-        ffn_out = self.ffn_dense2(ffn_out)
+        ffn_out = activation(self.ffn_dense2(ffn_out))
         x = 0.5 * x + ffn_out
         # x = x - jnp.mean(x, axis=-1, keepdims=True)/(jnp.std(x, axis=-1, keepdims=True) + 1e-8) # LayerNorm without learnable parameters
         return x

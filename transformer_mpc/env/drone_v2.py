@@ -372,7 +372,7 @@ class DroneV2(environment.Environment):
 
         total_torque = (
             u[1:4]
-            - ang_vel_skew @ params.I @ ang_vel
+            - ang_vel_skew @ jnp.diag(params.I) @ ang_vel
             - params.m * params.g * skew(params.com_pos) @ orientation_mat[2, :]
         )
 

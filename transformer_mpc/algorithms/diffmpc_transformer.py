@@ -348,7 +348,7 @@ def make_loss_fn(config, graphdef, rngs_state=None, state_template=None, **kwarg
                 W2_inf = jnp.linalg.norm(block.ffn_dense2.kernel.value, jnp.inf)
 
                 term1 = (0.5 + W1_inf * W2_inf)
-                term2 = (gamma1_inf / epsilon) * (0.5 + 0.25 * W_o * head_term)
+                term2 = (2*gamma1_inf / jnp.sqrt(epsilon)) * (0.5 + 0.25 * W_o * head_term)
                 A_delta = term1 * term2
 
                 # Cap A_delta to avoid extreme regularizer gradient explosion

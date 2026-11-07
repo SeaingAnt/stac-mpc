@@ -209,11 +209,6 @@ class DroneV1(environment.Environment):
 
         # Main task score: keep this non-saturating so reward does not collapse to ~0 far from target.
         pos_score = jnp.exp(-2.0 * pos_diff_norm)
-        close_bonus = jax.lax.select(
-            pos_diff_norm < 0.02,
-            4.0,
-            0.0,
-        )
 
         # Compute yaw error from quaternion
         # Yaw can be extracted from quaternion as: yaw = atan2(2*(q0*q3 + q1*q2), 1 - 2*(q2^2 + q3^2))
@@ -231,7 +226,16 @@ class DroneV1(environment.Environment):
         thrust_normalized_input = action_rescaled.at[0].set(action_rescaled[0] / (params.max_input[0]))
         thrust_normalized_input_last = env_state.last_u.at[0].set(env_state.last_u[0] / (params.max_input[0]))
 
-        omega_score = jnp.exp(-1.0 * jnp.linalg.norm(state_next.omega))
+        omega_norm = jnp.linalg.norm(state_next.omega)
+        omega_score = jnp.exp(-1.0 * omega_norm)
+        yaw_rate_score = jnp.exp(-2.0 * jnp.abs(state_next.omega[2]))
+
+        close_bonus = jax.lax.select(
+            (pos_diff_norm < 0.02) & (yaw_error < 0.1) & (omega_norm < 0.5),
+            4.0,
+            0.0,
+        )
+
         hover_score = jnp.exp(
             -1.5
             * jnp.linalg.norm(
@@ -254,8 +258,10 @@ class DroneV1(environment.Environment):
         # Position-gated weighted sum: informative reward scale, but no high reward while drifting/falling.
         reward = (
             3.0 * pos_score
-            + 1.0 * pos_score*reward_yaw
-            + 0.6 * reward_yaw *pos_score* omega_score
+            + 1.0 * pos_score * reward_yaw
+            + 0.8 * pos_score * omega_score
+            + 0.6 * pos_score * yaw_rate_score
+            + 0.6 * reward_yaw * pos_score * omega_score
             + 0.4 * pos_score * hover_score
             + 0.2 * pos_score * smooth_score
             + 1.2 * target_stability_score
@@ -332,7 +338,7 @@ class DroneV1(environment.Environment):
         )  # transpose + 3rd col = 3rd row
 
         total_torque = (
-            u[1:4] - ang_vel_skew @ params.I @ ang_vel - params.m * params.g * skew(params.com_pos) @ orientation_mat[2, :]
+            u[1:4] - ang_vel_skew @ jnp.diag(params.I) @ ang_vel - params.m * params.g * skew(params.com_pos) @ orientation_mat[2, :]
         ) 
 
         # Spatial Inertia Matrix

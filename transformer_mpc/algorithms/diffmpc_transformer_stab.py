@@ -441,11 +441,11 @@ def make_loss_fn(config, graphdef, rngs_state=None, state_template=None, **kwarg
                 W2_inf = jnp.linalg.norm(block.ffn_dense2.kernel.value, jnp.inf)
 
                 term1 = 0.5 + W1_inf * W2_inf
-                term2 = (gamma1_inf / epsilon) * (0.5 + 0.5 * W_o * head_term)
+                term2 = (2*gamma1_inf / jnp.sqrt(epsilon)) * (0.5 + 0.5 * W_o * head_term)
                 A_delta = term1 * term2
 
                 L_MHA_u = W_o * (sum_w_v + 0.5 * head_term)
-                B_delta = (gamma1_inf / epsilon) * (0.5 + W1_inf * W2_inf) * L_MHA_u
+                B_delta = (2*gamma1_inf / jnp.sqrt(epsilon)) * (0.5 + W1_inf * W2_inf) * L_MHA_u
 
                 # Cap A_delta and B_delta to avoid extreme regularizer gradient explosion
                 A_delta = jnp.minimum(A_delta, 3000.0)
